@@ -259,6 +259,54 @@ impl Database {
         self.set_setting("rectifier_config", &json)
     }
 
+    // --- 模型探测配置 ---
+
+    /// 获取模型探测配置；不存在时返回默认值。
+    pub fn get_model_probe_config(
+        &self,
+    ) -> Result<crate::services::model_probe::ModelProbeConfig, AppError> {
+        match self.get_setting("model_probe_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析模型探测配置失败: {e}"))),
+            None => Ok(crate::services::model_probe::ModelProbeConfig::default()),
+        }
+    }
+
+    /// 更新模型探测配置
+    pub fn set_model_probe_config(
+        &self,
+        config: &crate::services::model_probe::ModelProbeConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化模型探测配置失败: {e}")))?;
+        self.set_setting("model_probe_config", &json)
+    }
+
+    // --- 默认 AI 配置 ---
+
+    /// 获取默认 AI 配置（驱动内置聊天助手）；不存在时返回空配置。
+    ///
+    /// 刻意与供应商列表分开存储：删站点不应把助手的凭据一起带走。
+    pub fn get_default_ai_config(
+        &self,
+    ) -> Result<crate::services::default_ai::DefaultAiConfig, AppError> {
+        match self.get_setting("default_ai_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析默认 AI 配置失败: {e}"))),
+            None => Ok(crate::services::default_ai::DefaultAiConfig::default()),
+        }
+    }
+
+    /// 更新默认 AI 配置
+    pub fn set_default_ai_config(
+        &self,
+        config: &crate::services::default_ai::DefaultAiConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化默认 AI 配置失败: {e}")))?;
+        self.set_setting("default_ai_config", &json)
+    }
+
     // --- 优化器配置 ---
 
     /// 获取优化器配置

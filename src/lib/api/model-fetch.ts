@@ -12,6 +12,10 @@ export interface FetchedModel {
  *
  * 使用 OpenAI 兼容的 GET /v1/models 端点。优先用 `modelsUrl` 精确覆写；
  * 否则后端会对 baseURL 生成候选列表并按序尝试（含"剥离 /anthropic 等兼容子路径"兜底）。
+ *
+ * `preferAnthropicAuth` 为真时优先用 `x-api-key` + `anthropic-version` 鉴权
+ * （原生 Anthropic 端点不认 Bearer）；两种口径后端都会依次尝试，故传错只影响
+ * 第一次尝试的顺序，不会导致取不到模型。
  */
 export async function fetchModelsForConfig(
   baseUrl: string,
@@ -19,6 +23,7 @@ export async function fetchModelsForConfig(
   isFullUrl?: boolean,
   modelsUrl?: string,
   customUserAgent?: string,
+  preferAnthropicAuth?: boolean,
 ): Promise<FetchedModel[]> {
   return invoke("fetch_models_for_config", {
     baseUrl,
@@ -26,6 +31,7 @@ export async function fetchModelsForConfig(
     isFullUrl,
     modelsUrl,
     customUserAgent,
+    preferAnthropicAuth,
   });
 }
 

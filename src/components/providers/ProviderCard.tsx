@@ -30,6 +30,9 @@ import {
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
 import { resolveProviderIcon } from "@/utils/providerIcon";
+import { ProviderModelRow } from "@/components/providers/ProviderModelRow";
+import type { ModelProbeResult } from "@/lib/api/model-probe";
+import type { FetchedModel } from "@/lib/api/model-fetch";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -67,6 +70,22 @@ interface ProviderCardProps {
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
+  // ===== 模型行（默认兜底模型的展示 / 切换 / 测速）=====
+  // 由 ProviderList 统一从 useModelProbe 传入；appId 不支持单一默认模型时全部省略，
+  // 模型行不渲染。
+  modelRow?: ProviderModelRowState;
+}
+
+/** 模型行所需的状态与回调。省略时卡片不显示模型行。 */
+export interface ProviderModelRowState {
+  model?: string;
+  modelOptions?: FetchedModel[];
+  probeResult?: ModelProbeResult;
+  isProbing: boolean;
+  isFetchingModels: boolean;
+  onSelectModel: (model: string) => void;
+  onFetchModels: () => void;
+  onProbe: () => void;
 }
 
 /** 判断是否为官方供应商（无自定义 base URL / API key，直连官方 API） */
@@ -166,6 +185,7 @@ export function ProviderCard({
   // OpenClaw: default model
   isDefaultModel,
   onSetAsDefault,
+  modelRow,
 }: ProviderCardProps) {
   const { t } = useTranslation();
 
@@ -477,6 +497,22 @@ export function ProviderCard({
               >
                 <span className="min-w-0 truncate">{displayUrl}</span>
               </button>
+            )}
+
+            {/* 模型行：仅当该应用支持单一默认模型、且非官方账号类供应商时渲染。
+                官方供应商没有用户配置的探测目标（与连通检测按钮同一取舍）。 */}
+            {modelRow && !isOfficial && (
+              <ProviderModelRow
+                model={modelRow.model}
+                modelOptions={modelRow.modelOptions}
+                probeResult={modelRow.probeResult}
+                isProbing={modelRow.isProbing}
+                isFetchingModels={modelRow.isFetchingModels}
+                readOnly={isHermesReadOnly}
+                onSelectModel={modelRow.onSelectModel}
+                onFetchModels={modelRow.onFetchModels}
+                onProbe={modelRow.onProbe}
+              />
             )}
           </div>
         </div>

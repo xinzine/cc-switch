@@ -13,6 +13,7 @@ import {
   Minimize2,
   X,
   Book,
+  Bot,
   Brain,
   Wrench,
   History,
@@ -94,6 +95,7 @@ import ToolsPanel from "@/components/openclaw/ToolsPanel";
 import AgentsDefaultsPanel from "@/components/openclaw/AgentsDefaultsPanel";
 import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
+import { AiChatPanel } from "@/components/aichat/AiChatPanel";
 
 type View =
   | "providers"
@@ -174,6 +176,8 @@ function App() {
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : activeApp;
   const [currentView, setCurrentView] = useState<View>(getInitialView);
+  /** AI 助手侧边栏开关（不是独立视图，与 providers 列表并列显示）。 */
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
@@ -965,9 +969,9 @@ function App() {
           return <ToolsPanel />;
         case "openclawAgents":
           return <AgentsDefaultsPanel />;
-        default:
-          return (
-            <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden">
+        default: {
+          const providerList = (
+            <div className="flex-1 min-w-0 px-6 flex flex-col min-h-0 overflow-hidden">
               <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12 px-1">
                 <AnimatePresence mode="wait">
                   <motion.div
@@ -1031,6 +1035,23 @@ function App() {
               </div>
             </div>
           );
+
+          if (!isChatOpen) {
+            return providerList;
+          }
+
+          return (
+            <div className="flex flex-1 min-h-0 h-full overflow-hidden">
+              {providerList}
+              <div className="w-[360px] shrink-0 border-l border-border/40 flex flex-col min-h-0">
+                <AiChatPanel
+                  appId={activeApp}
+                  onOpenSettings={() => setCurrentView("settings")}
+                />
+              </div>
+            </div>
+          );
+        }
       }
     })();
 
@@ -1414,6 +1435,29 @@ function App() {
                           exit={{ opacity: 0 }}
                           transition={{ duration: 0.15 }}
                         >
+                          {/* 站点管理助手：与应用无关，所有应用下都可用，故放在
+                              按应用分支之前。 */}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              if (currentView !== "providers") {
+                                setCurrentView("providers");
+                              }
+                              setIsChatOpen((prev) => !prev);
+                            }}
+                            className={cn(
+                              "hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2",
+                              isChatOpen
+                                ? "text-foreground bg-black/5 dark:bg-white/5"
+                                : "text-muted-foreground hover:text-foreground",
+                            )}
+                            title={t("aiChat.title", {
+                              defaultValue: "站点管理助手",
+                            })}
+                          >
+                            <Bot className="w-4 h-4" />
+                          </Button>
                           {activeApp === "hermes" ? (
                             <>
                               <Button
@@ -1572,7 +1616,15 @@ function App() {
         </div>
       </header>
 
-      <main className="flex-1 min-h-0 flex flex-col overflow-y-auto animate-fade-in">
+      <main
+        className={cn(
+          "flex-1 min-h-0 flex flex-col animate-fade-in",
+          // 分栏时各列自行滚动，外层不能再 overflow-y-auto，否则会撑开到列高
+          currentView === "providers" && isChatOpen
+            ? "overflow-hidden"
+            : "overflow-y-auto",
+        )}
+      >
         {isOpenClawView && openclawHealthWarnings.length > 0 && (
           <OpenClawHealthBanner warnings={openclawHealthWarnings} />
         )}

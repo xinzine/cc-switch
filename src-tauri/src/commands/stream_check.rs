@@ -128,7 +128,10 @@ pub fn save_stream_check_config(
 
 /// Copilot 供应商的 base_url 需要从 OAuth 管理器动态解析（按账号或默认端点）。
 /// `is_full_url` 的供应商已是完整地址，无需解析。
-async fn resolve_copilot_base_url_override(
+///
+/// `pub(crate)` 供 [`crate::commands::model_probe`] 复用——模型探测面对同样的
+/// 「Copilot 端点随 OAuth token 动态变化」问题。
+pub(crate) async fn resolve_copilot_base_url_override(
     provider: &crate::provider::Provider,
     copilot_state: &State<'_, CopilotAuthState>,
 ) -> Result<Option<String>, AppError> {

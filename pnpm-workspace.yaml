@@ -6,3 +6,10 @@ onlyBuiltDependencies:
 
 ignoredBuiltDependencies:
   - msw
+
+# pnpm 11 用 allowBuilds 取代了上面的 onlyBuiltDependencies /
+# ignoredBuiltDependencies；不填这里 pnpm install 会以 ERR_PNPM_IGNORED_BUILDS
+# 退出，进而让 tauri dev 的 beforeDevCommand 失败。取值沿用上面已声明的意图。
+allowBuilds:
+  esbuild: true
+  msw: false

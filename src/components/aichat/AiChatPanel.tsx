@@ -1,0 +1,213 @@
+import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useQuery } from "@tanstack/react-query";
+import { Bot, Loader2, RotateCcw, Send, Settings } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { getDefaultAiConfig } from "@/lib/api/default-ai";
+import type { AppId } from "@/lib/api/types";
+import { useAiChat } from "./useAiChat";
+import { ChatMessageItem } from "./ChatMessageItem";
+import { ToolConfirmCard } from "./ToolConfirmCard";
+
+interface AiChatPanelProps {
+  /** 当前查看的应用；助手的工具调用省略 appId 时用它。 */
+  appId: AppId;
+  /** 跳转到设置页配置默认 AI。 */
+  onOpenSettings: () => void;
+}
+
+/**
+ * 站点管理助手。
+ *
+ * 由「默认 AI」驱动（凭据独立于站点列表存储），通过 function calling 操作站点。
+ * 增删改一律经确认卡，见 `ToolConfirmCard`。
+ */
+export function AiChatPanel({ appId, onOpenSettings }: AiChatPanelProps) {
+  const { t } = useTranslation();
+  const [draft, setDraft] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const {
+    messages,
+    isBusy,
+    pending,
+    error,
+    send,
+    confirmPending,
+    rejectPending,
+    reset,
+  } = useAiChat(appId);
+
+  const { data: config, isLoading: configLoading } = useQuery({
+    queryKey: ["defaultAiConfig"],
+    queryFn: getDefaultAiConfig,
+  });
+  const isConfigured = Boolean(
+    config?.baseUrl?.trim() && config?.apiKey?.trim() && config?.model?.trim(),
+  );
+
+  // 新消息滚到底部。
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, pending]);
+
+  const handleSubmit = () => {
+    const text = draft.trim();
+    if (!text || isBusy || pending) return;
+    setDraft("");
+    void send(text);
+  };
+
+  if (configLoading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (!isConfigured) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+        <Bot className="h-10 w-10 text-muted-foreground/50" />
+        <p className="text-sm text-muted-foreground">
+          {t("aiChat.notConfigured", {
+            defaultValue: "还没有配置默认 AI，助手无法工作",
+          })}
+        </p>
+        <p className="max-w-md text-xs text-muted-foreground/70">
+          {t("aiChat.notConfiguredHint", {
+            defaultValue:
+              "默认 AI 的凭据独立于站点列表存储，删站点不会影响它。请在设置里填写 Base URL、API Key 和模型。",
+          })}
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-1.5"
+          onClick={onOpenSettings}
+        >
+          <Settings className="h-3.5 w-3.5" />
+          {t("aiChat.openSettings", { defaultValue: "去设置" })}
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center justify-between border-b border-border/40 px-6 py-2">
+        <span className="text-xs text-muted-foreground">
+          {t("aiChat.modelHint", {
+            model: config?.model,
+            defaultValue: `由 ${config?.model} 驱动`,
+          })}
+        </span>
+        {messages.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 text-xs text-muted-foreground"
+            onClick={reset}
+            disabled={isBusy}
+          >
+            <RotateCcw className="h-3 w-3" />
+            {t("aiChat.newChat", { defaultValue: "新对话" })}
+          </Button>
+        )}
+      </div>
+
+      {/* 用原生滚动容器而非 ui/ScrollArea：需要直接持有 viewport ref 才能自动滚到底，
+          而 ScrollArea 没有暴露 viewportRef。 */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+        <div className="space-y-3 px-6 py-4">
+          {messages.length === 0 && <EmptyHint />}
+          {messages.map((message) => (
+            <ChatMessageItem key={message.id} message={message} />
+          ))}
+
+          {pending && (
+            <ToolConfirmCard
+              action={pending}
+              busy={isBusy}
+              onConfirm={() => void confirmPending()}
+              onReject={() => void rejectPending()}
+            />
+          )}
+
+          {isBusy && !pending && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {t("aiChat.thinking", { defaultValue: "思考中…" })}
+            </div>
+          )}
+
+          {error && (
+            <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              {error}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="border-t border-border/40 px-6 py-3">
+        <div className="flex items-end gap-2">
+          <Textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter 发送，Shift+Enter 换行。
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSubmit();
+              }
+            }}
+            placeholder={t("aiChat.placeholder", {
+              defaultValue: "让助手帮你管理站点，比如「列出所有站点并测速」",
+            })}
+            className="max-h-32 min-h-[2.5rem] resize-none"
+            rows={1}
+            disabled={isBusy || Boolean(pending)}
+          />
+          <Button
+            size="icon"
+            onClick={handleSubmit}
+            disabled={!draft.trim() || isBusy || Boolean(pending)}
+          >
+            <Send className="h-4 w-4" />
+          </Button>
+        </div>
+        {pending && (
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            {t("aiChat.pendingHint", {
+              defaultValue: "请先确认或拒绝上面的操作",
+            })}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EmptyHint() {
+  const { t } = useTranslation();
+  const examples = [
+    t("aiChat.example1", { defaultValue: "列出我所有的站点" }),
+    t("aiChat.example2", { defaultValue: "测试一下哪个站点最快" }),
+    t("aiChat.example3", { defaultValue: "帮我看看 xxx 站点有哪些模型" }),
+  ];
+  return (
+    <div className="flex flex-col items-center gap-3 py-10 text-center">
+      <Bot className="h-10 w-10 text-muted-foreground/40" />
+      <p className="text-sm text-muted-foreground">
+        {t("aiChat.emptyTitle", { defaultValue: "用自然语言管理你的站点" })}
+      </p>
+      <ul className="space-y-1 text-xs text-muted-foreground/70">
+        {examples.map((example) => (
+          <li key={example}>「{example}」</li>
+        ))}
+      </ul>
+    </div>
+  );
+}

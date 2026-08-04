@@ -31,6 +31,9 @@ struct ModelEntry {
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
 
+/// Anthropic Messages API 版本头。原生 Anthropic 端点缺此头会 400。
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
 /// 404/405 响应体截断长度：避免把几十 KB HTML 404 页整页保留到错误串里。
 const ERROR_BODY_MAX_CHARS: usize = 512;
 
@@ -51,12 +54,18 @@ const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
 /// 获取供应商的可用模型列表
 ///
 /// 使用 OpenAI 兼容的 GET /v1/models 端点，按候选列表顺序尝试。
+///
+/// `prefer_anthropic_auth` 为真时改用 Anthropic 的鉴权口径
+/// （`x-api-key` + `anthropic-version`）。Anthropic 原生端点不认 Bearer，
+/// 只发 Bearer 会稳定拿到 401；反之 OpenAI 兼容端点通常会忽略多余的 x-api-key，
+/// 因此两种口径都会作为候选依次尝试（先按偏好排，401/403 时换另一种）。
 pub async fn fetch_models(
     base_url: &str,
     api_key: &str,
     is_full_url: bool,
     models_url_override: Option<&str>,
     user_agent: Option<HeaderValue>,
+    prefer_anthropic_auth: bool,
 ) -> Result<Vec<FetchedModel>, String> {
     if api_key.is_empty() {
         return Err("API Key is required to fetch models".to_string());
@@ -67,63 +76,99 @@ pub async fn fetch_models(
     let mut last_err: Option<String> = None;
     let log_secrets = vec![api_key.to_string()];
 
-    for url in &candidates {
+    // 鉴权口径按偏好排序；每个 URL 先试首选，遇 401/403 再试另一种。
+    let auth_modes: [AuthMode; 2] = if prefer_anthropic_auth {
+        [AuthMode::Anthropic, AuthMode::Bearer]
+    } else {
+        [AuthMode::Bearer, AuthMode::Anthropic]
+    };
+
+    'candidates: for url in &candidates {
         log::debug!(
             "[ModelFetch] Trying endpoint: {}",
             crate::url_for_log_with_secrets(url, &log_secrets)
         );
-        let mut request = client
-            .get(url)
-            .header("Authorization", format!("Bearer {api_key}"))
-            .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS));
-        // 自定义 User-Agent：部分 /models 端点同样有 UA 白名单（如 Kimi Coding Plan），
-        // 与转发 / 检测路径共用同一 UA，避免"代理可用但取模型失败"。
-        if let Some(ua) = &user_agent {
-            request = request.header(USER_AGENT, ua.clone());
-        }
-        let response = match request.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(format!("Request failed: {e}"));
+
+        for (idx, mode) in auth_modes.iter().enumerate() {
+            let is_last_mode = idx + 1 == auth_modes.len();
+            let mut request = client
+                .get(url)
+                .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS));
+            request = match mode {
+                AuthMode::Bearer => request.header("Authorization", format!("Bearer {api_key}")),
+                AuthMode::Anthropic => request
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", ANTHROPIC_VERSION),
+            };
+            // 自定义 User-Agent：部分 /models 端点同样有 UA 白名单（如 Kimi Coding Plan），
+            // 与转发 / 检测路径共用同一 UA，避免"代理可用但取模型失败"。
+            if let Some(ua) = &user_agent {
+                request = request.header(USER_AGENT, ua.clone());
             }
-        };
+            let response = match request.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(format!("Request failed: {e}"));
+                }
+            };
 
-        let status = response.status();
+            let status = response.status();
 
-        if status.is_success() {
-            let resp: ModelsResponse = response
-                .json()
-                .await
-                .map_err(|e| format!("Failed to parse response: {e}"))?;
+            if status.is_success() {
+                let resp: ModelsResponse = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse response: {e}"))?;
 
-            let mut models: Vec<FetchedModel> = resp
-                .data
-                .unwrap_or_default()
-                .into_iter()
-                .map(|m| FetchedModel {
-                    id: m.id,
-                    owned_by: m.owned_by,
-                })
-                .collect();
+                let mut models: Vec<FetchedModel> = resp
+                    .data
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| FetchedModel {
+                        id: m.id,
+                        owned_by: m.owned_by,
+                    })
+                    .collect();
 
-            models.sort_by(|a, b| a.id.cmp(&b.id));
-            return Ok(models);
-        }
+                models.sort_by(|a, b| a.id.cmp(&b.id));
+                return Ok(models);
+            }
 
-        if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
+            // 路径不对：换下一个候选 URL（换鉴权口径也救不了 404）。
+            if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
+                let body = truncate_body(response.text().await.unwrap_or_default());
+                last_err = Some(format!("HTTP {status}: {body}"));
+                continue 'candidates;
+            }
+
+            // 鉴权被拒：同一个 URL 换另一种鉴权口径再试一次。
+            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                let body = truncate_body(response.text().await.unwrap_or_default());
+                last_err = Some(format!("HTTP {status}: {body}"));
+                if is_last_mode {
+                    continue 'candidates;
+                }
+                continue;
+            }
+
             let body = truncate_body(response.text().await.unwrap_or_default());
-            last_err = Some(format!("HTTP {status}: {body}"));
-            continue;
+            return Err(format!("HTTP {status}: {body}"));
         }
-
-        let body = truncate_body(response.text().await.unwrap_or_default());
-        return Err(format!("HTTP {status}: {body}"));
     }
 
     Err(format!(
         "All candidates failed: {}",
         last_err.unwrap_or_else(|| "no candidates".to_string())
     ))
+}
+
+/// `/models` 端点的鉴权口径。
+#[derive(Debug, Clone, Copy)]
+enum AuthMode {
+    /// `Authorization: Bearer <key>`（OpenAI 兼容端点）
+    Bearer,
+    /// `x-api-key: <key>` + `anthropic-version`（Anthropic 原生端点）
+    Anthropic,
 }
 
 /// 构造「模型列表端点」的候选 URL 列表

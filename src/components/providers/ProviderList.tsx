@@ -31,7 +31,18 @@ import {
   useHermesModelConfig,
 } from "@/hooks/useHermes";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
-import { ProviderCard } from "@/components/providers/ProviderCard";
+import { useModelProbe } from "@/hooks/useModelProbe";
+import {
+  getProviderModel,
+  setProviderModel,
+  supportsProviderModel,
+} from "@/utils/providerModel";
+import { useUpdateProviderMutation } from "@/lib/query/mutations";
+import {
+  ProviderCard,
+  type ProviderModelRowState,
+} from "@/components/providers/ProviderCard";
+import { BatchProbeToolbar } from "@/components/providers/BatchProbeToolbar";
 import { ProviderEmptyState } from "@/components/providers/ProviderEmptyState";
 import {
   useAutoFailoverEnabled,
@@ -96,6 +107,35 @@ export function ProviderList({
   const { sortedProviders, sensors, handleDragEnd } = useDragSort(
     providers,
     appId,
+  );
+
+  // ===== 模型行 / 批量测试 =====
+  // 仅对「单一默认模型」语义的应用启用；openclaw / opencode / hermes 用的是模型集合，
+  // 由各自的专用面板管理，列表页不显示模型控件。
+  const modelRowEnabled = supportsProviderModel(appId);
+  const {
+    probeOne,
+    probeAll,
+    cancelBatch,
+    fetchModels,
+    fetchAll,
+    getResult,
+    getModelOptions,
+    isProbing,
+    isFetchingModels,
+    batchProgress,
+  } = useModelProbe(appId);
+  const updateProvider = useUpdateProviderMutation(appId);
+
+  /** 行内切换模型：静默保存，避免每选一次都弹 toast。 */
+  const handleSelectModel = useCallback(
+    (provider: Provider, model: string) => {
+      updateProvider.mutate({
+        provider: setProviderModel(provider, appId, model),
+        silent: true,
+      });
+    },
+    [appId, updateProvider],
   );
 
   const { data: opencodeLiveIds } = useQuery({
@@ -294,6 +334,17 @@ export function ProviderList({
     });
   }, [searchTerm, sortedProviders]);
 
+  /**
+   * 批量操作候选：当前列表中可见、且不是官方账号类的供应商。
+   * 搜索后只操作过滤结果，按钮上的数量与实际请求数量一致。
+   */
+  const probeCandidateIds = useMemo(() => {
+    if (!modelRowEnabled) return [];
+    return filteredProviders
+      .filter((provider) => provider.category !== "official")
+      .map((provider) => provider.id);
+  }, [filteredProviders, modelRowEnabled]);
+
   const claudeDesktopStatusMessages = useMemo(() => {
     if (appId !== "claude-desktop" || !claudeDesktopStatus) return [];
 
@@ -440,6 +491,22 @@ export function ProviderList({
                 onSetAsDefault={
                   onSetAsDefault ? () => onSetAsDefault(provider) : undefined
                 }
+                modelRow={
+                  modelRowEnabled
+                    ? {
+                        model: getProviderModel(provider, appId),
+                        modelOptions: getModelOptions(provider.id),
+                        probeResult: getResult(provider.id),
+                        isProbing: isProbing(provider.id),
+                        isFetchingModels: isFetchingModels(provider.id),
+                        onSelectModel: (model) =>
+                          handleSelectModel(provider, model),
+                        onFetchModels: () =>
+                          fetchModels(provider.id, provider.name),
+                        onProbe: () => probeOne(provider.id, provider.name),
+                      }
+                    : undefined
+                }
               />
             );
           })}
@@ -450,6 +517,21 @@ export function ProviderList({
 
   return (
     <div className="mt-4 space-y-4">
+      {modelRowEnabled && probeCandidateIds.length > 0 && (
+        <div className="flex items-center justify-end">
+          <BatchProbeToolbar
+            candidateCount={probeCandidateIds.length}
+            progress={batchProgress}
+            onStart={() =>
+              probeAll(probeCandidateIds, probeCandidateIds.length)
+            }
+            onStartFetch={() =>
+              fetchAll(probeCandidateIds, probeCandidateIds.length)
+            }
+            onCancel={cancelBatch}
+          />
+        </div>
+      )}
       {claudeDesktopStatusMessages.length > 0 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-200">
           <div className="flex items-center gap-2 font-medium">
@@ -571,6 +653,7 @@ interface SortableProviderCardProps {
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
+  modelRow?: ProviderModelRowState;
 }
 
 function SortableProviderCard({
@@ -601,6 +684,7 @@ function SortableProviderCard({
   activeProviderId,
   isDefaultModel,
   onSetAsDefault,
+  modelRow,
 }: SortableProviderCardProps) {
   const {
     setNodeRef,
@@ -654,6 +738,7 @@ function SortableProviderCard({
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}
         onSetAsDefault={onSetAsDefault}
+        modelRow={modelRow}
       />
     </div>
   );

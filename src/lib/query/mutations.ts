@@ -167,6 +167,11 @@ export const useUpdateProviderMutation = (appId: AppId) => {
     }: {
       provider: Provider;
       originalId?: string;
+      /**
+       * 抑制成功提示。用于列表页的行内模型切换——每选一次模型都弹一个
+       * 「供应商更新成功」会刷屏。失败提示不受影响，静默失败更糟。
+       */
+      silent?: boolean;
     }) => {
       await providersApi.update(provider, appId, originalId);
       return provider;
@@ -189,14 +194,16 @@ export const useUpdateProviderMutation = (appId: AppId) => {
       if (appId === "hermes") {
         await invalidateHermesProviderCaches(queryClient);
       }
-      toast.success(
-        t("notifications.updateSuccess", {
-          defaultValue: "供应商更新成功",
-        }),
-        {
-          closeButton: true,
-        },
-      );
+      if (!variables.silent) {
+        toast.success(
+          t("notifications.updateSuccess", {
+            defaultValue: "供应商更新成功",
+          }),
+          {
+            closeButton: true,
+          },
+        );
+      }
     },
     onError: (error: Error) => {
       const detail = extractErrorMessage(error) || t("common.unknown");

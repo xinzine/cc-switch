@@ -41,6 +41,7 @@ import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettin
 import { SkillStorageLocationSettings } from "@/components/settings/SkillStorageLocationSettings";
 import { SkillSyncMethodSettings } from "@/components/settings/SkillSyncMethodSettings";
 import { TerminalSettings } from "@/components/settings/TerminalSettings";
+import { DefaultAiSettings } from "@/components/settings/DefaultAiSettings";
 import { DirectorySettings } from "@/components/settings/DirectorySettings";
 import { ImportExportSection } from "@/components/settings/ImportExportSection";
 import { BackupListSection } from "@/components/settings/BackupListSection";
@@ -288,6 +289,9 @@ export function SettingsPage({
                         handleAutoSave({ preferredTerminal: terminal })
                       }
                     />
+                    {/* 自管后端状态，不走 handleAutoSave——那条通道会把整个表单
+                        回传，apiKey 会随任何无关设置的保存一起进出。 */}
+                    <DefaultAiSettings />
                   </motion.div>
                 ) : null}
               </TabsContent>
