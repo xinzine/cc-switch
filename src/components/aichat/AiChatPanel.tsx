@@ -1,14 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
-import { Bot, Loader2, RotateCcw, Send, Settings } from "lucide-react";
+import { toast } from "sonner";
+import {
+  Bot,
+  ImagePlus,
+  Loader2,
+  RotateCcw,
+  Send,
+  Settings,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { getDefaultAiConfig } from "@/lib/api/default-ai";
 import type { AppId } from "@/lib/api/types";
-import { useAiChat } from "./useAiChat";
+import { useAiChat, type ChatImage } from "./useAiChat";
 import { ChatMessageItem } from "./ChatMessageItem";
 import { ToolConfirmCard } from "./ToolConfirmCard";
+
+/** 单张图片体积上限。base64 会膨胀约 1/3，5MB 原图约 6.7MB 请求体。 */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/** 一条消息最多带几张图。多了容易超上游的请求体上限。 */
+const MAX_IMAGES = 4;
 
 interface AiChatPanelProps {
   /** 当前查看的应用；助手的工具调用省略 appId 时用它。 */
@@ -21,12 +36,14 @@ interface AiChatPanelProps {
  * 站点管理助手。
  *
  * 由「默认 AI」驱动（凭据独立于站点列表存储），通过 function calling 操作站点。
- * 增删改一律经确认卡，见 `ToolConfirmCard`。
+ * 新增 / 修改直接执行；只有不可撤销的删除经 `ToolConfirmCard` 确认。
  */
 export function AiChatPanel({ appId, onOpenSettings }: AiChatPanelProps) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState("");
+  const [images, setImages] = useState<ChatImage[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const {
     messages,
     isBusy,
@@ -54,9 +71,53 @@ export function AiChatPanel({ appId, onOpenSettings }: AiChatPanelProps) {
 
   const handleSubmit = () => {
     const text = draft.trim();
-    if (!text || isBusy || pending) return;
+    // 只发图不打字是合理用法（「看这张截图」），故有图时允许空文本。
+    if ((!text && images.length === 0) || isBusy || pending) return;
+    const attached = images;
     setDraft("");
-    void send(text);
+    setImages([]);
+    void send(text, attached.length > 0 ? attached : undefined);
+  };
+
+  /** 读入图片文件，转 data URL 存进待发送列表。 */
+  const addFiles = async (files: File[]) => {
+    const remaining = MAX_IMAGES - images.length;
+    if (remaining <= 0) {
+      toast.error(
+        t("aiChat.imageTooMany", {
+          max: MAX_IMAGES,
+          defaultValue: `一条消息最多带 ${MAX_IMAGES} 张图`,
+        }),
+      );
+      return;
+    }
+
+    const picked: ChatImage[] = [];
+    for (const file of files.slice(0, remaining)) {
+      if (!file.type.startsWith("image/")) continue;
+      if (file.size > MAX_IMAGE_BYTES) {
+        toast.error(
+          t("aiChat.imageTooLarge", {
+            name: file.name,
+            max: Math.round(MAX_IMAGE_BYTES / 1024 / 1024),
+            defaultValue: `${file.name} 超过 ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB，已跳过`,
+          }),
+        );
+        continue;
+      }
+      try {
+        const dataUrl = await readAsDataUrl(file);
+        picked.push({ dataUrl, name: file.name });
+      } catch {
+        toast.error(
+          t("aiChat.imageReadFailed", {
+            name: file.name,
+            defaultValue: `${file.name} 读取失败`,
+          }),
+        );
+      }
+    }
+    if (picked.length > 0) setImages((prev) => [...prev, ...picked]);
   };
 
   if (configLoading) {
@@ -109,7 +170,10 @@ export function AiChatPanel({ appId, onOpenSettings }: AiChatPanelProps) {
             variant="ghost"
             size="sm"
             className="h-7 gap-1.5 text-xs text-muted-foreground"
-            onClick={reset}
+            onClick={() => {
+              reset();
+              setImages([]);
+            }}
             disabled={isBusy}
           >
             <RotateCcw className="h-3 w-3" />
@@ -152,7 +216,58 @@ export function AiChatPanel({ appId, onOpenSettings }: AiChatPanelProps) {
       </div>
 
       <div className="border-t border-border/40 px-6 py-3">
+        {/* 待发送图片的缩略图 */}
+        {images.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {images.map((img, i) => (
+              <div
+                key={`${img.name}-${i}`}
+                className="group relative h-16 w-16 overflow-hidden rounded-md border border-border/60"
+              >
+                <img
+                  src={img.dataUrl}
+                  alt={img.name}
+                  className="h-full w-full object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    setImages((prev) => prev.filter((_, idx) => idx !== i))
+                  }
+                  className="absolute right-0.5 top-0.5 rounded-full bg-background/90 p-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+                  aria-label={t("aiChat.imageRemove", {
+                    defaultValue: "移除图片",
+                  })}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="flex items-end gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              void addFiles(Array.from(e.target.files ?? []));
+              // 清空 value：同一文件连续选两次也要能触发 onChange。
+              e.target.value = "";
+            }}
+          />
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isBusy || Boolean(pending) || images.length >= MAX_IMAGES}
+            title={t("aiChat.imageAdd", { defaultValue: "添加图片" })}
+          >
+            <ImagePlus className="h-4 w-4" />
+          </Button>
           <Textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -163,17 +278,29 @@ export function AiChatPanel({ appId, onOpenSettings }: AiChatPanelProps) {
                 handleSubmit();
               }
             }}
+            onPaste={(e) => {
+              // 支持直接粘贴截图。
+              const files = Array.from(e.clipboardData.files);
+              if (files.length > 0) {
+                e.preventDefault();
+                void addFiles(files);
+              }
+            }}
             placeholder={t("aiChat.placeholder", {
               defaultValue: "让助手帮你管理站点，比如「列出所有站点并测速」",
             })}
-            className="max-h-32 min-h-[2.5rem] resize-none"
-            rows={1}
+            className="max-h-48 min-h-[5rem] resize-none"
+            rows={3}
             disabled={isBusy || Boolean(pending)}
           />
           <Button
             size="icon"
             onClick={handleSubmit}
-            disabled={!draft.trim() || isBusy || Boolean(pending)}
+            disabled={
+              (!draft.trim() && images.length === 0) ||
+              isBusy ||
+              Boolean(pending)
+            }
           >
             <Send className="h-4 w-4" />
           </Button>
@@ -188,6 +315,16 @@ export function AiChatPanel({ appId, onOpenSettings }: AiChatPanelProps) {
       </div>
     </div>
   );
+}
+
+/** File → `data:<mime>;base64,...`。后端据此转 Anthropic 的 base64 source。 */
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 function EmptyHint() {

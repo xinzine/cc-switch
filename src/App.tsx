@@ -70,14 +70,21 @@ import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
 import { FailoverToggle } from "@/components/proxy/FailoverToggle";
 import UsageScriptModal from "@/components/UsageScriptModal";
-import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
-import PromptPanel from "@/components/prompts/PromptPanel";
+import UnifiedMcpPanel, {
+  type UnifiedMcpPanelHandle,
+} from "@/components/mcp/UnifiedMcpPanel";
+import PromptPanel, {
+  type PromptPanelHandle,
+} from "@/components/prompts/PromptPanel";
 import {
   SkillsPage,
   getSkillsPageHeaderActions,
   type SkillsPageSource,
+  type SkillsPageHandle,
 } from "@/components/skills/SkillsPage";
-import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
+import UnifiedSkillsPanel, {
+  type UnifiedSkillsPanelHandle,
+} from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
@@ -252,10 +259,10 @@ function App() {
 
   useUsageCacheBridge();
 
-  const promptPanelRef = useRef<any>(null);
-  const mcpPanelRef = useRef<any>(null);
-  const skillsPageRef = useRef<any>(null);
-  const unifiedSkillsPanelRef = useRef<any>(null);
+  const promptPanelRef = useRef<PromptPanelHandle>(null);
+  const mcpPanelRef = useRef<UnifiedMcpPanelHandle>(null);
+  const skillsPageRef = useRef<SkillsPageHandle>(null);
+  const unifiedSkillsPanelRef = useRef<UnifiedSkillsPanelHandle>(null);
   // 订阅未管理 Skill 的共享缓存（实际扫描由 UnifiedSkillsPanel 进入页面时触发）。
   // 这里 enabled 默认 false，仅用于「导入」按钮的绿点提示，不主动发起扫描。
   const { data: unmanagedSkills } = useScanUnmanagedSkills();
@@ -1043,7 +1050,7 @@ function App() {
           return (
             <div className="flex flex-1 min-h-0 h-full overflow-hidden">
               {providerList}
-              <div className="w-[360px] shrink-0 border-l border-border/40 flex flex-col min-h-0">
+              <div className="w-[480px] shrink-0 border-l border-border/40 flex flex-col min-h-0">
                 <AiChatPanel
                   appId={activeApp}
                   onOpenSettings={() => setCurrentView("settings")}
@@ -1080,12 +1087,12 @@ function App() {
         <div
           className="fixed top-0 left-0 right-0 z-[70] flex items-center justify-end px-2"
           data-tauri-drag-region
-          style={{ WebkitAppRegion: "drag", height: dragBarHeight } as any}
+          style={{ WebkitAppRegion: "drag", height: dragBarHeight }}
         >
           {useAppWindowControls && (
             <div
               className="flex items-center gap-1"
-              style={{ WebkitAppRegion: "no-drag" } as any}
+              style={{ WebkitAppRegion: "no-drag" }}
             >
               <Button
                 variant="ghost"
@@ -1154,22 +1161,20 @@ function App() {
       <header
         className="fixed z-50 w-full transition-all duration-300 bg-background/80 backdrop-blur-md"
         {...DRAG_REGION_ATTR}
-        style={
-          {
-            ...DRAG_REGION_STYLE,
-            top: dragBarHeight,
-            height: HEADER_HEIGHT,
-          } as any
-        }
+        style={{
+          ...DRAG_REGION_STYLE,
+          top: dragBarHeight,
+          height: HEADER_HEIGHT,
+        }}
       >
         <div
           className="flex h-full items-center justify-between gap-2 px-6"
           {...DRAG_REGION_ATTR}
-          style={{ ...DRAG_REGION_STYLE } as any}
+          style={{ ...DRAG_REGION_STYLE }}
         >
           <div
             className="flex items-center gap-1"
-            style={{ WebkitAppRegion: "no-drag" } as any}
+            style={{ WebkitAppRegion: "no-drag" }}
           >
             {currentView !== "providers" ? (
               <div className="flex items-center gap-2">
@@ -1272,7 +1277,7 @@ function App() {
               activeApp !== "hermes" && (
                 <div
                   className="flex shrink-0 items-center gap-1.5"
-                  style={{ WebkitAppRegion: "no-drag" } as any}
+                  style={{ WebkitAppRegion: "no-drag" }}
                 >
                   {activeApp === "claude-desktop" ? (
                     <ClaudeDesktopRouteToggle />
@@ -1291,7 +1296,7 @@ function App() {
               (settingsData?.showProfileSwitcher ?? true) && (
                 <div
                   className="flex shrink-0 items-center"
-                  style={{ WebkitAppRegion: "no-drag" } as any}
+                  style={{ WebkitAppRegion: "no-drag" }}
                 >
                   <ProfileSwitcher activeApp={activeApp} />
                 </div>
@@ -1299,7 +1304,7 @@ function App() {
             <div className="flex flex-1 min-w-0 overflow-x-hidden items-center py-4 pr-2">
               <div
                 className="flex shrink-0 items-center gap-1.5 ml-auto"
-                style={{ WebkitAppRegion: "no-drag" } as any}
+                style={{ WebkitAppRegion: "no-drag" }}
               >
                 {currentView === "prompts" && (
                   <Button

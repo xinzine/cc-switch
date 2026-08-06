@@ -174,6 +174,8 @@ struct StreamOutcome {
     first_token_ms: Option<u64>,
     duration_ms: u64,
     text: String,
+    /// 首批解析成功的 SSE 事件（最多 3 条），在未提取到文本时用于诊断上游实际返回了什么。
+    raw_events: Vec<Value>,
 }
 
 pub struct ModelProbeService;
@@ -357,13 +359,27 @@ pub async fn probe_endpoint(
     // 200 但一个文本增量都没有：多数是网关返回了非 SSE 的 JSON 错误体，或模型
     // 被静默拒绝。当成失败更诚实——否则会显示「通」但首字为空。
     if outcome.first_token_ms.is_none() {
-        let hint = if outcome.text.is_empty() {
-            "Stream returned no text content".to_string()
-        } else {
+        let hint = if !outcome.text.is_empty() {
+            // 非 SSE 的 JSON body（如 {"error": ...}）或缓冲区剩余内容。
             format!(
                 "Stream returned no text content: {}",
                 truncate_text(&outcome.text)
             )
+        } else if !outcome.raw_events.is_empty() {
+            // 收到了 SSE 事件但都不含文本增量（thinking / ping / tool_call 等）。
+            // 把前几条原始事件序列化后展示，方便判断是 format 配错还是思维链耗尽 token。
+            let sample = outcome
+                .raw_events
+                .iter()
+                .map(|e| serde_json::to_string(e).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!(
+                "Stream returned no text content. Received: {}",
+                truncate_text(&sample)
+            )
+        } else {
+            "Stream returned no text content".to_string()
         };
         return ModelProbeResult {
             http_status: Some(status.as_u16()),
@@ -395,6 +411,9 @@ async fn read_stream(
     let mut remainder: Vec<u8> = Vec::new();
     let mut text = String::new();
     let mut first_token_ms: Option<u64> = None;
+    // 诊断用：收集未找到文本增量前的原始事件（最多 3 条），
+    // 用于在错误消息里展示上游实际发了什么（thinking/ping/错误体等）。
+    let mut raw_events: Vec<Value> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(map_request_error)?;
@@ -412,6 +431,10 @@ async fn read_stream(
                 let Ok(event) = serde_json::from_str::<Value>(data) else {
                     continue;
                 };
+                // 在找到文本之前，留存样本供诊断。
+                if first_token_ms.is_none() && raw_events.len() < 3 {
+                    raw_events.push(event.clone());
+                }
                 if let Some(delta) = extract_text_delta(&event, format) {
                     if delta.is_empty() {
                         continue;
@@ -434,6 +457,7 @@ async fn read_stream(
         first_token_ms,
         duration_ms: start.elapsed().as_millis() as u64,
         text,
+        raw_events,
     })
 }
 

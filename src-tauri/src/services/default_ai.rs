@@ -8,7 +8,8 @@
 //! 以流式 SSE 发带 function calling 的对话（文本增量通过 callback 实时推出）、
 //! 以及把前端存的 OpenAI 形状历史转换为 Anthropic 协议（tool_calls / tool 消息）。
 //!
-//! 工具的实际执行在前端，后端不代为执行——助手对站点的增删改必须经用户在 UI 上确认。
+//! 工具的实际执行在前端，后端不代为执行。新增 / 修改由前端直接调用既有命令，
+//! 不可撤销的删除必须经用户在 UI 上确认。
 
 use futures::StreamExt;
 use reqwest::header::USER_AGENT;
@@ -170,39 +171,7 @@ impl DefaultAiService {
 
         let format = config.format();
         let url = chat_url(&config.base_url, format)?;
-
-        // 构造请求体（流式）
-        let body = match format {
-            ApiFormat::Anthropic => {
-                let (system, msgs) = to_anthropic_messages(&messages);
-                let mut b = json!({
-                    "model": config.model,
-                    "max_tokens": 4096,
-                    "stream": true,
-                    "messages": msgs,
-                });
-                if let Some(s) = system {
-                    b["system"] = json!(s);
-                }
-                if !tools.is_empty() {
-                    b["tools"] =
-                        json!(tools.iter().map(to_anthropic_tool).collect::<Vec<Value>>());
-                }
-                b
-            }
-            _ => {
-                let mut b = json!({
-                    "model": config.model,
-                    "stream": true,
-                    "messages": messages,
-                });
-                if !tools.is_empty() {
-                    b["tools"] = json!(tools);
-                    b["tool_choice"] = json!("auto");
-                }
-                b
-            }
-        };
+        let body = build_chat_body(format, &config.model, &messages, &tools);
 
         let client = crate::proxy::http_client::get();
         let mut request = client
@@ -274,17 +243,21 @@ fn chat_url(base_url: &str, format: ApiFormat) -> Result<String, AppError> {
     build_probe_url(base_url, format, "", false)
 }
 
-/// 构造对话请求体（仅供单测使用）。
-#[cfg(test)]
+/// 构造对话请求体（流式）。
+///
+/// `chat()` 与单测共用这一份，避免测试断言一个不上线的副本——这个坑踩过一次：
+/// 曾有一份 `#[cfg(test)]` 的旧副本，改断言时以为改的是生产路径。
 fn build_chat_body(format: ApiFormat, model: &str, messages: &[Value], tools: &[Value]) -> Value {
     match format {
         ApiFormat::Anthropic => {
-            // Anthropic 把 system 提到顶层，且工具 schema 形状不同。
-            let (system, rest) = split_system_message(messages);
+            // Anthropic 把 system 提到顶层，工具 schema 形状不同，
+            // 且历史里的 tool_calls / tool 消息要改写成 tool_use / tool_result。
+            let (system, msgs) = to_anthropic_messages(messages);
             let mut body = json!({
                 "model": model,
                 "max_tokens": 4096,
-                "messages": rest,
+                "stream": true,
+                "messages": msgs,
             });
             if let Some(system) = system {
                 body["system"] = json!(system);
@@ -297,6 +270,7 @@ fn build_chat_body(format: ApiFormat, model: &str, messages: &[Value], tools: &[
         _ => {
             let mut body = json!({
                 "model": model,
+                "stream": true,
                 "messages": messages,
             });
             if !tools.is_empty() {
@@ -306,26 +280,6 @@ fn build_chat_body(format: ApiFormat, model: &str, messages: &[Value], tools: &[
             body
         }
     }
-}
-
-/// 取出 system 消息内容并返回其余消息（仅供单测使用）。
-#[cfg(test)]
-fn split_system_message(messages: &[Value]) -> (Option<String>, Vec<Value>) {
-    let mut system = None;
-    let mut rest = Vec::with_capacity(messages.len());
-    for msg in messages {
-        if msg.get("role").and_then(Value::as_str) == Some("system") {
-            if system.is_none() {
-                system = msg
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-            }
-            continue;
-        }
-        rest.push(msg.clone());
-    }
-    (system, rest)
 }
 
 /// OpenAI 工具 schema → Anthropic 工具 schema。
@@ -515,8 +469,7 @@ where
                     .and_then(Value::as_array)
                 {
                     for tc in tcs {
-                        let idx =
-                            tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                        let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                         let acc = tool_map.entry(idx).or_insert_with(|| OaiToolAcc {
                             id: String::new(),
                             name: String::new(),
@@ -527,16 +480,12 @@ where
                                 acc.id = id.to_string();
                             }
                         }
-                        if let Some(n) =
-                            tc.pointer("/function/name").and_then(Value::as_str)
-                        {
+                        if let Some(n) = tc.pointer("/function/name").and_then(Value::as_str) {
                             if !n.is_empty() {
                                 acc.name = n.to_string();
                             }
                         }
-                        if let Some(a) =
-                            tc.pointer("/function/arguments").and_then(Value::as_str)
-                        {
+                        if let Some(a) = tc.pointer("/function/arguments").and_then(Value::as_str) {
                             acc.arguments.push_str(a);
                         }
                     }
@@ -611,15 +560,11 @@ where
             };
 
             // JSON "type" 优先于 SSE "event:" 字段
-            let json_type = ev
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or(ev_type);
+            let json_type = ev.get("type").and_then(Value::as_str).unwrap_or(ev_type);
 
             match json_type {
                 "content_block_start" => {
-                    let idx =
-                        ev.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let idx = ev.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                     let block_type = ev
                         .pointer("/content_block/type")
                         .and_then(Value::as_str)
@@ -647,10 +592,7 @@ where
                         );
                     } else if block_type == "text" {
                         // 部分网关把初始文本放在 start 事件
-                        if let Some(t) = ev
-                            .pointer("/content_block/text")
-                            .and_then(Value::as_str)
-                        {
+                        if let Some(t) = ev.pointer("/content_block/text").and_then(Value::as_str) {
                             if !t.is_empty() {
                                 content.push_str(t);
                                 on_text_delta(t.to_string())?;
@@ -659,17 +601,14 @@ where
                     }
                 }
                 "content_block_delta" => {
-                    let idx =
-                        ev.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let idx = ev.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                     let delta_type = ev
                         .pointer("/delta/type")
                         .and_then(Value::as_str)
                         .unwrap_or("");
                     match delta_type {
                         "text_delta" => {
-                            if let Some(t) =
-                                ev.pointer("/delta/text").and_then(Value::as_str)
-                            {
+                            if let Some(t) = ev.pointer("/delta/text").and_then(Value::as_str) {
                                 if !t.is_empty() {
                                     content.push_str(t);
                                     on_text_delta(t.to_string())?;
@@ -677,9 +616,8 @@ where
                             }
                         }
                         "input_json_delta" => {
-                            if let Some(partial) = ev
-                                .pointer("/delta/partial_json")
-                                .and_then(Value::as_str)
+                            if let Some(partial) =
+                                ev.pointer("/delta/partial_json").and_then(Value::as_str)
                             {
                                 if let Some(acc) = tool_blocks.get_mut(&idx) {
                                     acc.arguments.push_str(partial);
@@ -690,10 +628,7 @@ where
                     }
                 }
                 "message_delta" => {
-                    if let Some(fr) = ev
-                        .pointer("/delta/stop_reason")
-                        .and_then(Value::as_str)
-                    {
+                    if let Some(fr) = ev.pointer("/delta/stop_reason").and_then(Value::as_str) {
                         finish_reason = Some(fr.to_string());
                     }
                 }
@@ -741,6 +676,49 @@ where
 /// - assistant `tool_calls` → content array 里的 `tool_use` block。
 /// - `role:"tool"` → user 消息里的 `tool_result` block；
 ///   连续多条 tool result 合并进同一个 user 消息（并行 tool calls 必须）。
+/// - user content 数组里的 `image_url` block → Anthropic 的 `image` block。
+///
+/// OpenAI 单个 content block → Anthropic content block。
+///
+/// 图片形状差异较大：
+/// - OpenAI: `{type:"image_url", image_url:{url:"data:image/png;base64,XXX"}}`
+/// - Anthropic: `{type:"image", source:{type:"base64", media_type, data}}`
+///
+/// 只处理 data URL：Anthropic 的 base64 source 不接受远程 URL，而本应用的图片
+/// 都来自本地文件读取，不会出现 http(s) 形式。无法识别的 block 原样透传，让
+/// 上游给出明确报错，而不是在这里静默丢内容。
+fn to_anthropic_block(block: &Value) -> Value {
+    if block.get("type").and_then(Value::as_str) != Some("image_url") {
+        return block.clone();
+    }
+    let url = block
+        .pointer("/image_url/url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match parse_data_url(url) {
+        Some((media_type, data)) => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }),
+        None => block.clone(),
+    }
+}
+
+/// 拆 `data:<media-type>;base64,<data>`，返回 `(media_type, data)`。
+fn parse_data_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let media_type = meta.strip_suffix(";base64")?;
+    if media_type.is_empty() || data.is_empty() {
+        return None;
+    }
+    Some((media_type.to_string(), data.to_string()))
+}
+
 fn to_anthropic_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
     let mut system: Option<String> = None;
     let mut result: Vec<Value> = Vec::new();
@@ -748,14 +726,14 @@ fn to_anthropic_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
     for msg in messages {
         let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
         match role {
-            "system" => {
-                if system.is_none() {
-                    system = msg
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                }
+            // 只取第一条 system：Anthropic 顶层 system 是单值，后续的直接丢弃。
+            "system" if system.is_none() => {
+                system = msg
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
             }
+            "system" => {}
             "assistant" => {
                 let mut blocks: Vec<Value> = Vec::new();
                 if let Some(text) = msg.get("content").and_then(Value::as_str) {
@@ -765,10 +743,7 @@ fn to_anthropic_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
                 }
                 if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
                     for c in calls {
-                        let id = c
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
+                        let id = c.get("id").and_then(Value::as_str).unwrap_or_default();
                         let name = c
                             .pointer("/function/name")
                             .and_then(Value::as_str)
@@ -777,8 +752,8 @@ fn to_anthropic_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
                             .pointer("/function/arguments")
                             .and_then(Value::as_str)
                             .unwrap_or("{}");
-                        let input: Value = serde_json::from_str(args_str)
-                            .unwrap_or_else(|_| json!({}));
+                        let input: Value =
+                            serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
                         blocks.push(json!({
                             "type": "tool_use",
                             "id": id,
@@ -809,13 +784,9 @@ fn to_anthropic_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
                 // 如果上一条已是 user 消息且包含 tool_result，合并进去（并行调用）
                 let merged = if let Some(last) = result.last_mut() {
                     if last.get("role").and_then(Value::as_str) == Some("user") {
-                        if let Some(arr) = last
-                            .get_mut("content")
-                            .and_then(Value::as_array_mut)
-                        {
+                        if let Some(arr) = last.get_mut("content").and_then(Value::as_array_mut) {
                             if arr.iter().any(|b| {
-                                b.get("type").and_then(Value::as_str)
-                                    == Some("tool_result")
+                                b.get("type").and_then(Value::as_str) == Some("tool_result")
                             }) {
                                 arr.push(tr_block.clone());
                                 true
@@ -839,10 +810,16 @@ fn to_anthropic_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
                 }
             }
             "user" => {
-                // 已经是字符串时包进 text block
+                // 已经是字符串时包进 text block；数组形式逐块转换（图片形状两家不同）
                 let content = match msg.get("content") {
                     Some(Value::String(s)) => {
                         json!([{ "type": "text", "text": s }])
+                    }
+                    Some(Value::Array(blocks)) => {
+                        json!(blocks
+                            .iter()
+                            .map(to_anthropic_block)
+                            .collect::<Vec<Value>>())
                     }
                     Some(v) => v.clone(),
                     None => json!([{ "type": "text", "text": "" }]),
@@ -966,6 +943,146 @@ mod tests {
         let body = build_chat_body(ApiFormat::OpenAiChat, "gpt-x", &messages, &[]);
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn openai_body_passes_image_blocks_through_unchanged() {
+        // OpenAI 兼容端点原生吃 image_url，不该被改写。
+        let messages = vec![json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "看这张图" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAA" } },
+            ],
+        })];
+        let body = build_chat_body(ApiFormat::OpenAiChat, "gpt-x", &messages, &[]);
+        assert_eq!(
+            body.pointer("/messages/0/content/1/image_url/url")
+                .and_then(Value::as_str),
+            Some("data:image/png;base64,AAA")
+        );
+    }
+
+    #[test]
+    fn anthropic_body_rewrites_image_url_to_base64_source() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "看这张图" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAA" } },
+            ],
+        })];
+        let body = build_chat_body(ApiFormat::Anthropic, "claude-x", &messages, &[]);
+
+        // 文本块保持原样。
+        assert_eq!(
+            body.pointer("/messages/0/content/0/type")
+                .and_then(Value::as_str),
+            Some("text")
+        );
+        // 图片块要转成 Anthropic 的 base64 source 形状。
+        assert_eq!(
+            body.pointer("/messages/0/content/1/type")
+                .and_then(Value::as_str),
+            Some("image")
+        );
+        assert_eq!(
+            body.pointer("/messages/0/content/1/source/media_type")
+                .and_then(Value::as_str),
+            Some("image/png")
+        );
+        assert_eq!(
+            body.pointer("/messages/0/content/1/source/data")
+                .and_then(Value::as_str),
+            Some("AAA")
+        );
+        // 不能残留 OpenAI 形状，否则 Anthropic 会 400。
+        assert!(body.pointer("/messages/0/content/1/image_url").is_none());
+    }
+
+    #[test]
+    fn non_data_url_image_is_left_alone() {
+        // Anthropic 的 base64 source 不接受远程 URL；原样透传让上游给出明确报错，
+        // 而不是在这里静默丢掉用户的图。
+        let block = json!({
+            "type": "image_url",
+            "image_url": { "url": "https://example.com/a.png" },
+        });
+        assert_eq!(to_anthropic_block(&block), block);
+    }
+
+    #[test]
+    fn parse_data_url_rejects_malformed_input() {
+        assert_eq!(
+            parse_data_url("data:image/jpeg;base64,ZZZ"),
+            Some(("image/jpeg".to_string(), "ZZZ".to_string()))
+        );
+        // 缺 base64 标记、缺逗号、缺数据、非 data URL：一律不认。
+        assert_eq!(parse_data_url("data:image/png,AAA"), None);
+        assert_eq!(parse_data_url("data:image/png;base64"), None);
+        assert_eq!(parse_data_url("data:image/png;base64,"), None);
+        assert_eq!(parse_data_url("data:;base64,AAA"), None);
+        assert_eq!(parse_data_url("https://example.com/a.png"), None);
+    }
+
+    #[test]
+    fn anthropic_messages_rewrite_tool_call_round() {
+        // 前端历史是 OpenAI 形状：assistant.tool_calls + role:"tool"。
+        // Anthropic 要 tool_use block + user 消息里的 tool_result。
+        let messages = vec![
+            json!({ "role": "user", "content": "删掉 p1" }),
+            json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "deleteProvider", "arguments": "{\"id\":\"p1\"}" }
+                }],
+            }),
+            json!({ "role": "tool", "tool_call_id": "call_1", "content": "{\"ok\":true}" }),
+        ];
+        let (system, msgs) = to_anthropic_messages(&messages);
+        assert!(system.is_none());
+        assert_eq!(msgs.len(), 3);
+
+        assert_eq!(
+            msgs[1].pointer("/content/0/type").and_then(Value::as_str),
+            Some("tool_use")
+        );
+        // arguments 是 JSON 字符串，Anthropic 的 input 要求对象。
+        assert_eq!(
+            msgs[1]
+                .pointer("/content/0/input/id")
+                .and_then(Value::as_str),
+            Some("p1")
+        );
+
+        // tool 结果必须变成 user 角色，否则 Anthropic 会 400。
+        assert_eq!(msgs[2].get("role").and_then(Value::as_str), Some("user"));
+        assert_eq!(
+            msgs[2]
+                .pointer("/content/0/tool_use_id")
+                .and_then(Value::as_str),
+            Some("call_1")
+        );
+    }
+
+    #[test]
+    fn parallel_tool_results_merge_into_one_user_message() {
+        // 并行 tool calls 的多条结果必须合并进同一个 user 消息。
+        let messages = vec![
+            json!({ "role": "tool", "tool_call_id": "c1", "content": "r1" }),
+            json!({ "role": "tool", "tool_call_id": "c2", "content": "r2" }),
+        ];
+        let (_, msgs) = to_anthropic_messages(&messages);
+        assert_eq!(msgs.len(), 1, "两条 tool result 应合并为一条 user 消息");
+        let blocks = msgs[0].get("content").and_then(Value::as_array).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks[1].get("tool_use_id").and_then(Value::as_str),
+            Some("c2")
+        );
     }
 
     #[test]

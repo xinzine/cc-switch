@@ -13,14 +13,14 @@ import {
   setProviderModel,
   supportsProviderModel,
 } from "@/utils/providerModel";
-import { REQUIRES_CONFIRMATION } from "./tools";
+import { WRITE_TOOLS } from "./tools";
 
 /**
  * 工具执行器。
  *
- * 只读工具直接执行；写操作由 `AiChatPanel` 拦在确认卡后面，确认后再调用这里的
- * `executeWrite`。这个分层是有意的——执行器本身不做权限判断，判断在调用点，
- * 这样「哪些工具需要确认」只有 [`REQUIRES_CONFIRMATION`] 一处定义。
+ * 只读工具走 `executeRead`，新增 / 修改 / 删除走 `executeWrite`。
+ * 是否需要确认由调用点的 `REQUIRES_CONFIRMATION` 决定（当前只有删除）；执行器只按
+ * [`WRITE_TOOLS`] 校验工具类别，不把“是否写入”和“是否确认”混为一谈。
  */
 
 export interface ToolOutcome {
@@ -153,7 +153,7 @@ export function useChatTools(defaultAppId: AppId) {
   );
 
   /**
-   * 执行写操作。**只应在用户点了确认卡之后调用。**
+   * 执行写操作。新增 / 修改可直接调用；删除由 `useAiChat` 的确认卡放行后调用。
    *
    * 用既有的 `providersApi`，与手工在界面上操作走同一条路径，因此同样的校验、
    * 同样的 live 配置写入逻辑都在。
@@ -163,7 +163,7 @@ export function useChatTools(defaultAppId: AppId) {
       name: string,
       args: Record<string, unknown>,
     ): Promise<ToolOutcome> => {
-      if (!REQUIRES_CONFIRMATION.has(name)) {
+      if (!WRITE_TOOLS.has(name)) {
         return { ok: false, data: { error: `${name} 不是写操作` } };
       }
       const appId = resolveAppId(args.appId);

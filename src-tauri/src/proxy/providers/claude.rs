@@ -215,14 +215,18 @@ pub fn normalize_deepseek_thinking_disabled_strip_effort(
         changed |= oc.remove("effort").is_some();
         // Clean up empty output_config
         if oc.is_empty() {
-            body.as_object_mut().unwrap().remove("output_config");
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("output_config");
+            }
         }
     }
 
     // Remove reasoning_effort (OpenAI format, may be present in passthrough)
     if body.get("reasoning_effort").is_some() {
-        body.as_object_mut().unwrap().remove("reasoning_effort");
-        changed = true;
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("reasoning_effort");
+            changed = true;
+        }
     }
 
     changed

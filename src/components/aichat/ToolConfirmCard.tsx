@@ -13,10 +13,10 @@ interface ToolConfirmCardProps {
 }
 
 /**
- * 写操作确认卡。
+ * 删除操作确认卡。
  *
- * 助手对站点的增删改一律经过这里——模型误判很常见，让它直接改用户的配置不可接受。
- * 参数以「字段：值」列出，让用户在按下确认前能看清到底要改什么。
+ * 删除不可撤销，模型误判时直接执行会造成数据丢失，因此必须在这里等用户确认。
+ * 参数以「字段：值」列出，让用户在按下确认前能看清到底要删什么。
  */
 export function ToolConfirmCard({
   action,
@@ -101,10 +101,6 @@ export function ToolConfirmCard({
 
 function describeAction(name: string): string {
   switch (name) {
-    case "createProvider":
-      return "助手想新增一个站点，确认吗？";
-    case "updateProvider":
-      return "助手想修改一个站点，确认吗？";
     case "deleteProvider":
       return "助手想删除一个站点，确认吗？";
     default:

@@ -1,25 +1,100 @@
 <div align="center">
 
-# CC Switch
+# CC Switch PD
 
 ### The All-in-One Manager for Claude Code, Claude Desktop, Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw & Hermes Agent
 
-[![Version](https://img.shields.io/github/v/release/farion1231/cc-switch?color=blue&label=version)](https://github.com/farion1231/cc-switch/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/farion1231/cc-switch/releases)
+[![Version](https://img.shields.io/badge/version-3.20.0-blue.svg)](https://github.com/xinzine/cc-switch/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/xinzine/cc-switch/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
-[![Downloads](https://img.shields.io/github/downloads/farion1231/cc-switch/total)](https://github.com/farion1231/cc-switch/releases/latest)
-
-<a href="https://trendshift.io/repositories/15372" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15372" alt="farion1231%2Fcc-switch | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-<a href="https://www.star-history.com/#farion1231/cc-switch&Date"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=farion1231/cc-switch&theme=dark" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=farion1231/cc-switch" width="196" height="55" /></picture></a>
-
-### 🌐 The Only Official Website: **[ccswitch.io](https://ccswitch.io)**
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 English | [中文](README_ZH.md) | [日本語](README_JA.md) | [Deutsch](README_DE.md) | [Changelog](CHANGELOG.md)
 
 </div>
 
+> **About this fork** — `CC Switch PD` is a downstream fork of
+> [farion1231/cc-switch](https://github.com/farion1231/cc-switch) (upstream website:
+> [ccswitch.io](https://ccswitch.io)). It keeps everything upstream does and adds a
+> built-in AI assistant, real model speed testing, and per-card model switching.
+> Everything in [What's new in this fork](#whats-new-in-this-fork) is specific to this
+> repository and is not part of upstream releases.
+
+## What's new in this fork
+
+### Built-in AI assistant (chat-driven provider management)
+
+A dedicated **AI Chat** view sits next to the provider list. It talks to a
+**Default AI** that you configure separately from your providers, so deleting a
+provider never takes the assistant's own credentials with it.
+
+The assistant can list and inspect providers, create and edit them, fetch model
+lists, and run speed tests through function calling:
+
+| Tool                                | Behavior                                        |
+| ----------------------------------- | ----------------------------------------------- |
+| `listProviders` / `getProvider`     | Read-only, runs immediately                     |
+| `createProvider` / `updateProvider` | **Applied immediately, no confirmation prompt** |
+| `deleteProvider`                    | **Always requires your confirmation**           |
+| `fetchModels`                       | Reads the provider's `/models` endpoint         |
+| `probeModel` / `probeAllModels`     | Real requests, consumes quota                   |
+
+Deletion is the only irreversible action, so it is the only one gated behind a
+confirmation card. If the model asks to delete several providers in one turn,
+only the first is offered for confirmation and the rest are reported back as
+**not executed** — nothing slips past the prompt. API keys returned by
+`getProvider` are masked and never shown to the model in plaintext.
+
+### Image input (multimodal)
+
+Attach screenshots of a dashboard or API docs and let the assistant read the
+`baseUrl`, key, and model names straight out of the picture.
+
+- Click the image button, or paste an image directly into the input box
+- Up to **4 images per message**, **5 MB each**
+- Thumbnails are shown before sending and can be removed individually
+- Sent images are echoed back in your own message bubble
+- OpenAI-compatible endpoints receive native `image_url` parts; Anthropic
+  endpoints get converted base64 `image` blocks automatically
+
+Pick a **multimodal model** for the Default AI — image input and function
+calling are both required. The settings page says so inline, and it never
+overwrites a model you already configured.
+
+### Real model speed testing
+
+Upstream's connectivity check only pings the base URL. This fork sends a **real
+streaming chat request** and reports:
+
+- **Time to first token** — when the first non-empty text delta arrives
+- **Total duration** — when the stream closes
+- The actual reply text, so you can confirm the model really answered
+
+Results render directly on each provider card, colored by outcome. They live in
+memory only and disappear on refresh — a speed test answers "is it fast right
+now", and a stale number is worse than no number.
+
+Defaults: 30s timeout, `max_tokens: 64`, 4 concurrent requests for batch runs
+(clamped to sane ranges, configurable). Official login providers are skipped
+since they have no user-configured endpoint to probe.
+
+> **This spends real quota.** Every test is a billable request. Batch runs ask
+> for confirmation first, and canceling stops results from filling in but cannot
+> recall requests already in flight.
+
+### Model switching from the provider list
+
+Cards for Claude Code, Claude Desktop, Codex, Gemini CLI, and Grok Build now
+show the provider's default fallback model with a dropdown, a **Fetch models**
+button, and a **Test** button — no need to open the edit form. Claude's `[1M]`
+long-context marker is preserved across model changes.
+
+Batch **Test all** and **Fetch all** buttons live in the list toolbar.
+
 ## ❤️Sponsor
 
+> These sponsors support **upstream CC Switch**, not this fork. Links below are
+> upstream's affiliate links, kept as-is out of respect for the original project.
 > [Want to appear here?](mailto:farion1231@gmail.com)
 
 <details open>
@@ -244,6 +319,13 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 - **Prompts** — Markdown editor with cross-app sync (CLAUDE.md / AGENTS.md / GEMINI.md) and backfill protection
 - **Skills** — One-click install from GitHub repos or ZIP files, custom repository management, with symlink and file copy support
 
+### AI Assistant & Model Testing (this fork)
+
+- **Chat-driven management** — Ask the built-in assistant to list, create, edit, or delete providers; only deletion needs confirmation
+- **Image input** — Paste or attach screenshots (max 4 per message, 5 MB each) and let a multimodal model read config out of them
+- **Real speed tests** — Streaming requests measuring time-to-first-token and total duration, shown on the cards, in-memory only
+- **Card-level model switching** — Change the default fallback model, fetch model lists, and test single or all providers from the list
+
 ### Usage & Cost Tracking
 
 - **Usage dashboard** — Track spending, requests, and tokens with trend charts, detailed request logs, and custom per-model pricing
@@ -312,6 +394,35 @@ Add an official provider from the preset list. After switching to it, run the Lo
 - **Skills**: `~/.cc-switch/skills/` (symlinked to corresponding apps by default)
 - **Skill Backups**: `~/.cc-switch/skill-backups/` (created automatically before uninstall, keeps 20 most recent)
 
+The Default AI credentials added by this fork live in the same SQLite database
+under the `default_ai_config` settings key — same storage level as your existing
+provider keys, stored in plaintext locally and included in config exports and
+backups. Speed test results are never written to disk.
+
+</details>
+
+<details>
+<summary><strong>Does the assistant change my providers without asking? (this fork)</strong></summary>
+
+Creating and editing apply immediately — they are reversible, and the assistant
+tells you what it changed. **Deleting always waits for your confirmation**, and a
+rejected deletion is reported back to the model so it stops retrying.
+
+The backend never executes tools on its own: `chat_default_ai` only returns the
+tool calls the model requested, and the frontend runs them through the same
+provider commands the UI uses. Nothing is deleted just because a model said so.
+
+</details>
+
+<details>
+<summary><strong>Why does speed testing cost money? (this fork)</strong></summary>
+
+Because a base-URL ping cannot tell you whether a model actually answers. Each
+test sends one real streaming chat request capped at `max_tokens: 64`. Batch runs
+default to 4 concurrent requests to avoid tripping upstream rate limits, which
+would otherwise look like slowness. Canceling stops results from being applied
+but cannot recall requests already sent.
+
 </details>
 
 <details>
@@ -351,6 +462,20 @@ For detailed guides on every feature, check out the **[User Manual](docs/user-ma
 
 > **Note**: On first launch, you can manually import existing CLI tool configs as the default provider.
 
+### AI Assistant & Speed Testing (this fork)
+
+1. **Configure the Default AI**: Settings → General → _Default AI_ → fill in Base
+   URL, API key, and a **multimodal** model, pick `OpenAI Chat` or `Anthropic`,
+   then hit **Test**
+2. **Open the assistant**: Click the AI Chat entry in the header and ask in plain
+   language, e.g. _"list every provider and find the fastest one"_
+3. **Send a screenshot**: Use the image button or just paste — the assistant reads
+   the endpoint and key out of the image and creates the provider for you
+4. **Test from a card**: Use **Fetch models** to populate the dropdown, then
+   **Test** for time-to-first-token and total duration
+5. **Test everything**: Use **Test all** in the toolbar (asks first, since it
+   spends quota) and watch results land on each card
+
 ## Download & Installation
 
 ### System Requirements
@@ -359,47 +484,43 @@ For detailed guides on every feature, check out the **[User Manual](docs/user-ma
 - **macOS**: macOS 12 (Monterey) and above
 - **Linux**: Ubuntu 22.04+ / Debian 11+ / Fedora 34+ and other mainstream distributions
 
-### Windows Users
+### Installing this fork
 
-Download the latest `CC-Switch-v{version}-Windows.msi` installer or `CC-Switch-v{version}-Windows-Portable.zip` portable version from the [Releases](../../releases) page.
-
-### macOS Users
-
-**Method 1: Install via Homebrew (Recommended)**
+`CC Switch PD` does not publish prebuilt binaries, so build it from source
+(see the [Development Guide](#development-guide) for the toolchain):
 
 ```bash
-brew install --cask cc-switch
+pnpm install
+pnpm tauri build                     # all bundles for the current platform
+pnpm tauri build --bundles nsis      # Windows installer only
 ```
 
-Update:
+Artifacts land under `src-tauri/target/release/`:
 
-```bash
-brew upgrade --cask cc-switch
-```
+| Artifact              | Path                                                            |
+| --------------------- | --------------------------------------------------------------- |
+| Windows installer     | `bundle/nsis/CC Switch PD_<version>_x64-setup.exe`              |
+| Portable executable   | `cc-switch-pd.exe`                                              |
+| macOS / Linux bundles | `bundle/dmg/`, `bundle/deb/`, `bundle/rpm/`, `bundle/appimage/` |
 
-**Method 2: Manual Download**
+> **Note on `TAURI_SIGNING_PRIVATE_KEY`** — `tauri.conf.json` enables updater
+> artifacts, so a full `pnpm tauri build` exits non-zero at the very end without
+> a signing key. The installer and executable are already written by that point
+> and work fine; only the auto-update signature is skipped. Set the variable if
+> you need signed update bundles.
 
-Download `CC-Switch-v{version}-macOS.dmg` (recommended) or `.zip` from the [Releases](../../releases) page.
+Installing this fork alongside upstream CC Switch is not recommended: both share
+the identifier `com.ccswitch.desktop` and the same `~/.cc-switch` data directory.
 
-> **Note**: CC Switch for macOS is code-signed and notarized by Apple. You can install and open it directly.
+### Upstream prebuilt releases
 
-### Arch Linux Users
+Prefer the original app without the additions above? Grab an official build from
+upstream instead:
 
-**Install via paru (Recommended)**
-
-```bash
-paru -S cc-switch-bin
-```
-
-### Linux Users
-
-Download the latest Linux build from the [Releases](../../releases) page:
-
-- `CC-Switch-v{version}-Linux.deb` (Debian/Ubuntu)
-- `CC-Switch-v{version}-Linux.rpm` (Fedora/RHEL/openSUSE)
-- `CC-Switch-v{version}-Linux.AppImage` (Universal)
-
-> **Flatpak**: Not included in official releases. You can build it yourself from the `.deb` — see [`flatpak/README.md`](flatpak/README.md) for instructions.
+- **Windows / Linux / macOS**: [farion1231/cc-switch releases](https://github.com/farion1231/cc-switch/releases)
+- **macOS (Homebrew)**: `brew install --cask cc-switch` — signed and notarized
+- **Arch Linux**: `paru -S cc-switch-bin`
+- **Flatpak**: not shipped upstream either; build from the `.deb` per [`flatpak/README.md`](flatpak/README.md)
 
 <details>
 <summary><strong>Architecture Overview</strong></summary>
@@ -441,6 +562,8 @@ Download the latest Linux build from the [Releases](../../releases) page:
 - **SessionManager**: Conversation history browsing across supported session sources
 - **ConfigService**: Config import/export, backup rotation
 - **SpeedtestService**: API endpoint latency measurement
+- **ModelProbeService** _(this fork)_: Real streaming probes measuring time-to-first-token and total duration, with bounded-concurrency batch runs
+- **DefaultAiService** _(this fork)_: Streams the assistant conversation with function calling and normalizes OpenAI/Anthropic message, tool, and image formats
 
 </details>
 
@@ -544,6 +667,7 @@ pnpm test:unit --coverage
 ├── src/                        # Frontend (React + TypeScript)
 │   ├── components/
 │   │   ├── providers/          # Provider management
+│   │   ├── aichat/             # AI assistant: chat, tools, image input (fork)
 │   │   ├── mcp/                # MCP panel
 │   │   ├── prompts/            # Prompts management
 │   │   ├── skills/             # Skills management
@@ -587,12 +711,22 @@ Before submitting PRs, please ensure:
 - Pass type check: `pnpm typecheck`
 - Pass format check: `pnpm format:check`
 - Pass unit tests: `pnpm test:unit`
+- Pass Rust checks: `cargo fmt --check --manifest-path src-tauri/Cargo.toml` and `cargo test --manifest-path src-tauri/Cargo.toml`
+
+CI runs the same frontend checks on Ubuntu plus Rust fmt, clippy, and tests on
+Linux, Windows, and macOS for every push and PR to `main`.
 
 For new features, please open an issue for discussion before submitting a PR. PRs for features that are not a good fit for the project may be closed.
 
-## Star History
+If a change belongs upstream rather than in this fork, send it to
+[farion1231/cc-switch](https://github.com/farion1231/cc-switch) so everyone benefits.
 
-[![Star History Chart](https://api.star-history.com/svg?repos=farion1231/cc-switch&type=Date)](https://www.star-history.com/#farion1231/cc-switch&Date)
+## Credits
+
+Built on [farion1231/cc-switch](https://github.com/farion1231/cc-switch) by Jason
+Young. All upstream provider management, proxy, MCP, prompts, skills, and usage
+tracking features come from that project; this fork adds the AI assistant, real
+model speed testing, and card-level model switching.
 
 ## License
 

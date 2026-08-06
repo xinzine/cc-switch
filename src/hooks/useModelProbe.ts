@@ -41,7 +41,10 @@ export function useModelProbe(appId: AppId) {
     null,
   );
   // 取消标记用 ref 而非 state：批量循环里读的必须是最新值，state 会被闭包捕获成旧值。
-  const cancelledRef = useRef(false);
+  // 两个操作各自持有独立的 ref：若 probeAll / fetchAll 同时运行，其中一个重置为 false
+  // 不会影响另一个的取消状态，cancelBatch 则同时置两者为 true。
+  const probeCancelledRef = useRef(false);
+  const fetchCancelledRef = useRef(false);
 
   const setResult = useCallback((id: string, result: ModelProbeResult) => {
     setResults((prev) => new Map(prev).set(id, result));
@@ -116,14 +119,14 @@ export function useModelProbe(appId: AppId) {
    */
   const probeAll = useCallback(
     async (providerIds?: string[], totalHint?: number) => {
-      cancelledRef.current = false;
+      probeCancelledRef.current = false;
       const total = totalHint ?? providerIds?.length ?? 0;
       setBatchProgress({ done: 0, total, kind: "probe" });
       setProbingIds(new Set(providerIds ?? []));
 
       try {
         const pairs = await probeAllProviderModels(appId, providerIds);
-        if (cancelledRef.current) return;
+        if (probeCancelledRef.current) return;
 
         setResults((prev) => {
           const next = new Map(prev);
@@ -165,7 +168,8 @@ export function useModelProbe(appId: AppId) {
    * 这里只停止结果回填并立即解除 UI 加载状态；已经发出的网络请求无法撤回。
    */
   const cancelBatch = useCallback(() => {
-    cancelledRef.current = true;
+    probeCancelledRef.current = true;
+    fetchCancelledRef.current = true;
     setProbingIds(new Set());
     setFetchingIds(new Set());
     setBatchProgress(null);
@@ -178,14 +182,14 @@ export function useModelProbe(appId: AppId) {
    */
   const fetchAll = useCallback(
     async (providerIds?: string[], totalHint?: number) => {
-      cancelledRef.current = false;
+      fetchCancelledRef.current = false;
       const total = totalHint ?? providerIds?.length ?? 0;
       setBatchProgress({ done: 0, total, kind: "fetch" });
       setFetchingIds(new Set(providerIds ?? []));
 
       try {
         const results = await batchFetchModels(appId, providerIds);
-        if (cancelledRef.current) return;
+        if (fetchCancelledRef.current) return;
 
         const successful = results.filter((result) => result.success);
         const okCount = successful.length;

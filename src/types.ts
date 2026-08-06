@@ -195,11 +195,7 @@ export interface ProviderMeta {
   // - "openai_chat": OpenAI Chat Completions 格式，需要格式转换
   // - "openai_responses": OpenAI Responses API 格式，需要格式转换
   // - "gemini_native": Gemini Native generateContent API 格式，需要格式转换
-  apiFormat?:
-    | "anthropic"
-    | "openai_chat"
-    | "openai_responses"
-    | "gemini_native";
+  apiFormat?: ClaudeApiFormat;
   // 通用认证绑定
   authBinding?: AuthBinding;
   // Claude 认证字段名
@@ -286,8 +282,8 @@ export interface VisibleApps {
   hermes: boolean;
 }
 
-// WebDAV 同步状态
-export interface WebDavSyncStatus {
+// 同步状态通用字段（WebDAV / S3 共用）
+export interface SyncStatus {
   lastSyncAt?: number | null;
   lastError?: string | null;
   lastErrorSource?: string | null;
@@ -295,6 +291,9 @@ export interface WebDavSyncStatus {
   lastLocalManifestHash?: string | null;
   lastRemoteManifestHash?: string | null;
 }
+
+// WebDAV 同步状态（保持向后兼容，等同于 SyncStatus）
+export type WebDavSyncStatus = SyncStatus;
 
 // WebDAV 同步配置
 export interface WebDavSyncSettings {
@@ -319,7 +318,7 @@ export interface S3SyncSettings {
   endpoint?: string;
   remoteRoot?: string;
   profile?: string;
-  status?: WebDavSyncStatus;
+  status?: SyncStatus;
 }
 
 export type RemoteSnapshotLayout = "current" | "legacy";

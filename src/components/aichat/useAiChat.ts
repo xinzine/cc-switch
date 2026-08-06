@@ -2,25 +2,39 @@ import { useCallback, useRef, useState } from "react";
 import { chatDefaultAi, type ToolCall } from "@/lib/api/default-ai";
 import type { AppId } from "@/lib/api/types";
 import { useChatTools } from "./useChatTools";
-import { CHAT_TOOLS, REQUIRES_CONFIRMATION, buildSystemPrompt } from "./tools";
+import {
+  CHAT_TOOLS,
+  REQUIRES_CONFIRMATION,
+  WRITE_TOOLS,
+  buildSystemPrompt,
+} from "./tools";
 
 /**
  * 聊天助手的对话状态机。
  *
- * 一轮的流程：用户发言 → 模型回复（可能带工具调用）→ 只读工具立即执行、
- * 写操作挂起等确认 → 工具结果回喂模型 → 循环，直到模型不再请求工具。
+ * 一轮的流程：用户发言 → 模型回复（可能带工具调用）→ 工具执行 →
+ * 结果回喂模型 → 循环，直到模型不再请求工具。
  *
- * 挂起的写操作会中断循环：用户点确认/拒绝后再继续。这样模型永远看不到
- * 「我以为改了但其实没改」的中间态。
+ * 工具分派看 `WRITE_TOOLS`（决定执行器），确认看 `REQUIRES_CONFIRMATION`
+ * （只有删除）。挂起的删除会中断循环：用户点确认/拒绝后再继续，这样模型
+ * 永远看不到「我以为删了但其实没删」的中间态。
  */
 
 /** 工具循环的最大轮数。防止模型陷入「取模型→测速→再取」的死循环烧额度。 */
 const MAX_TOOL_ROUNDS = 8;
 
+/** 用户附带的图片。`dataUrl` 是 `data:image/png;base64,...` 形式。 */
+export interface ChatImage {
+  dataUrl: string;
+  name: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "tool";
   content: string;
+  /** 用户这条消息附带的图片（用于界面回显）。 */
+  images?: ChatImage[];
   /** 助手这一轮发起的工具调用（用于界面回显）。 */
   toolCalls?: ToolCall[];
   /** role === "tool" 时：对应的工具名与执行结果摘要。 */
@@ -28,7 +42,7 @@ export interface ChatMessage {
   toolOk?: boolean;
 }
 
-/** 等待用户确认的写操作。 */
+/** 等待用户确认的写操作（当前只有删除）。 */
 export interface PendingAction {
   call: ToolCall;
   args: Record<string, unknown>;
@@ -165,33 +179,45 @@ export function useAiChat(appId: AppId) {
 
         if (reply.toolCalls.length === 0) return;
 
-        // 写操作要停下来等确认。只挂起第一个——模型一次要求删两个站点时，
-        // 逐个确认比一次性批准更安全。
-        const writeCall = reply.toolCalls.find((c) =>
+        /** 按工具名选执行器。写工具走 `executeWrite`，其余走 `executeRead`。 */
+        const runCall = (call: ToolCall) => {
+          const args = parseArgs(call.arguments);
+          return WRITE_TOOLS.has(call.name)
+            ? executeWrite(call.name, args)
+            : executeRead(call.name, args);
+        };
+
+        // 需确认的操作（当前只有删除）要停下来等用户。只挂起第一个——模型一次
+        // 要求删两个站点时，逐个确认比一次性批准更安全。
+        const confirmCall = reply.toolCalls.find((c) =>
           REQUIRES_CONFIRMATION.has(c.name),
         );
-        if (writeCall) {
+        if (confirmCall) {
           setPending({
-            call: writeCall,
-            args: parseArgs(writeCall.arguments),
+            call: confirmCall,
+            args: parseArgs(confirmCall.arguments),
           });
-          // 同一轮里的只读工具先跑掉，免得确认后还要多跑一圈。
+          // 同一轮里不需确认的工具先跑掉，免得确认后还要多跑一圈。
+          // 如果模型同一轮发了多个删除，只挂起第一个，其余明确标记为未执行；
+          // 绝不能因为它不是当前挂起项就绕过确认。
           for (const call of reply.toolCalls) {
-            if (call.id === writeCall.id) continue;
-            const outcome = await executeRead(
-              call.name,
-              parseArgs(call.arguments),
-            );
+            if (call.id === confirmCall.id) continue;
+            if (REQUIRES_CONFIRMATION.has(call.name)) {
+              pushToolResult(call, false, {
+                ok: false,
+                error:
+                  "同一轮只能确认一个删除。此删除未执行；请等待用户处理当前删除后，再单独发起。",
+              });
+              continue;
+            }
+            const outcome = await runCall(call);
             pushToolResult(call, outcome.ok, outcome.data);
           }
           return;
         }
 
         for (const call of reply.toolCalls) {
-          const outcome = await executeRead(
-            call.name,
-            parseArgs(call.arguments),
-          );
+          const outcome = await runCall(call);
           pushToolResult(call, outcome.ok, outcome.data);
         }
       }
@@ -204,13 +230,15 @@ export function useAiChat(appId: AppId) {
           "工具调用轮数达到上限，已停止。请换个说法再试，或把任务拆小一些。",
       });
     },
-    [appendUi, executeRead, pushToolResult],
+    [appendUi, executeRead, executeWrite, pushToolResult],
   );
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, images?: ChatImage[]) => {
       const trimmed = text.trim();
-      if (!trimmed || isBusy || pending) return;
+      const hasImages = Boolean(images && images.length > 0);
+      // 只发图不打字是合理的用法（「看这张截图」），故文本可空。
+      if ((!trimmed && !hasImages) || isBusy || pending) return;
 
       setError(null);
       setIsBusy(true);
@@ -220,11 +248,29 @@ export function useAiChat(appId: AppId) {
           { role: "system", content: buildSystemPrompt(appId) },
         ];
       }
+      // 带图时用 OpenAI 多模态 content 数组；纯文本仍发字符串，避免给
+      // 不支持数组形式的兼容端点添麻烦。
       wireRef.current = [
         ...wireRef.current,
-        { role: "user", content: trimmed },
+        {
+          role: "user",
+          content: hasImages
+            ? [
+                ...(trimmed ? [{ type: "text", text: trimmed }] : []),
+                ...images!.map((img) => ({
+                  type: "image_url",
+                  image_url: { url: img.dataUrl },
+                })),
+              ]
+            : trimmed,
+        },
       ];
-      appendUi({ id: crypto.randomUUID(), role: "user", content: trimmed });
+      appendUi({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: trimmed,
+        images: hasImages ? images : undefined,
+      });
 
       try {
         await runLoop();

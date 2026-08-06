@@ -19,17 +19,24 @@ export function useUsageEventBridge() {
     let unlisten: UnlistenFn | undefined;
     let disposed = false;
 
-    (async () => {
-      const off = await listen("usage-log-recorded", () => {
-        // invalidate 整个 usage 命名空间：summary / trends / providerStats /
-        // modelStats / logs 全部跟着重拉
-        queryClient.invalidateQueries({ queryKey: usageKeys.all });
-      });
+    void (async () => {
+      try {
+        const off = await listen("usage-log-recorded", () => {
+          // invalidate 整个 usage 命名空间：summary / trends / providerStats /
+          // modelStats / logs 全部跟着重拉
+          queryClient.invalidateQueries({ queryKey: usageKeys.all });
+        });
 
-      if (disposed) {
-        off();
-      } else {
-        unlisten = off;
+        if (disposed) {
+          off();
+        } else {
+          unlisten = off;
+        }
+      } catch (err) {
+        console.error(
+          "[useUsageEventBridge] Failed to subscribe to usage-log-recorded",
+          err,
+        );
       }
     })();
 

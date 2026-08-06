@@ -3,20 +3,25 @@
  *
  * ## 安全模型
  *
- * 工具分两类，由 [`REQUIRES_CONFIRMATION`] 划分：
- * - **只读 / 无副作用**（列站点、取模型、测速）：助手请求即执行。
- * - **写操作**（新增 / 编辑 / 删除站点）：**不直接执行**，先在聊天里渲染确认卡，
- *   用户点确认后才落库。模型误判很常见，让它直接改用户的配置不可接受。
+ * 两个维度，各自独立：
+ * - [`WRITE_TOOLS`] 决定走哪个执行器（`executeWrite` 而非 `executeRead`）。
+ * - [`REQUIRES_CONFIRMATION`] 决定是否先弹确认卡。
+ *
+ * 新增 / 修改是可回退的（改错了再改回来即可），故直接执行；
+ * **删除不可撤销**，是唯一需要用户点确认的操作。
  *
  * 后端不参与工具执行（见 `services/default_ai.rs`），全部在前端跑。
  */
 
-/** 需要用户确认才执行的工具。 */
-export const REQUIRES_CONFIRMATION = new Set([
+/** 会改数据的工具：必须走 `executeWrite`。 */
+export const WRITE_TOOLS = new Set([
   "createProvider",
   "updateProvider",
   "deleteProvider",
 ]);
+
+/** 需要用户确认才执行的工具。只有删除——它不可撤销。 */
+export const REQUIRES_CONFIRMATION = new Set(["deleteProvider"]);
 
 /** 破坏性工具：确认卡用醒目样式，且文案要说清不可撤销。 */
 export const DESTRUCTIVE_TOOLS = new Set(["deleteProvider"]);
@@ -187,7 +192,9 @@ export function buildSystemPrompt(appId: string): string {
     "",
     "工作方式：",
     "- 动手前先用 listProviders 确认现状，不要凭猜测操作。",
-    "- 新增/修改/删除会先弹确认卡给用户，你不需要额外征求同意，直接发起工具调用即可；但要在回复里说清你打算做什么。",
+    "- 新增/修改会直接生效，不需要征求同意，直接发起工具调用即可；但要在回复里说清你做了什么。",
+    "- 删除会弹确认卡等用户点确认，你同样直接发起调用即可，不要额外追问。",
+    "- 用户发图片时（截图配置页、API 文档等）你能看到图片内容，据此提取 baseUrl / apiKey / 模型名再建站。",
     "- 测速会消耗真实额度。用户没明确要求时不要主动批量测速。",
     "- 用户要求「找最快的站点」这类任务时，先列出站点，再批量测速，最后按首字延迟排序汇报。",
     "- 报告延迟用秒（一位小数），例如「首字 2.2 秒」。",

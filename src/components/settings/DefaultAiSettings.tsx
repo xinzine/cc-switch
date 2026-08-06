@@ -220,8 +220,14 @@ export function DefaultAiSettings() {
                 ? handleFetchModels
                 : undefined
             }
-            placeholder="gpt-5.5"
+            placeholder="gemini-2.5-flash"
           />
+          <p className="text-xs text-muted-foreground">
+            {t("defaultAi.multimodalHint", {
+              defaultValue:
+                "请选择支持图片输入的多模态模型，例如 gemini-2.5-flash、gpt-4o 或 Claude 3.5 Sonnet。",
+            })}
+          </p>
         </div>
       </div>
 

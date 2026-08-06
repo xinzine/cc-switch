@@ -9,7 +9,7 @@ import type { ModelProbeResult } from "./model-probe";
  * 这样删站点不会把助手的配置一起带走。
  *
  * 安全边界：`chatDefaultAi` 只把模型想调用的工具**原样回传**，后端不代为执行。
- * 增删改站点一律由前端在用户确认后走既有的 provider 命令。
+ * 新增 / 修改由前端直接走既有 provider 命令；删除必须经用户确认。
  */
 
 export interface DefaultAiConfig {

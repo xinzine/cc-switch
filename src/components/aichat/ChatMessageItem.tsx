@@ -19,6 +19,24 @@ export function ChatMessageItem({ message }: { message: ChatMessage }) {
             : "border border-border/60 bg-card",
         )}
       >
+        {message.images && message.images.length > 0 && (
+          <div
+            className={cn(
+              "flex flex-wrap gap-1.5",
+              message.content ? "mb-2" : "",
+            )}
+          >
+            {message.images.map((img, i) => (
+              <img
+                key={`${img.name}-${i}`}
+                src={img.dataUrl}
+                alt={img.name}
+                title={img.name}
+                className="h-20 w-20 rounded-md border border-border/40 object-cover"
+              />
+            ))}
+          </div>
+        )}
         {message.content}
         {message.toolCalls && message.toolCalls.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
