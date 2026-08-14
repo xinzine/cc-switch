@@ -12,6 +12,10 @@
 //! 首字 = 收到**第一个携带非空文本增量的 SSE 事件**的时刻，而非 TCP 首字节。
 //! 空的 role/ping/前导事件不计入，否则各家网关的前导事件数量差异会让数字不可比。
 //!
+//! 唯一的例外：整条流**只有**思维链增量、一个文本增量都没有时（开了思维链的模型
+//! 遇上 `max_tokens` 上限，token 全花在思考上），退化为用首个思维链增量的时刻。
+//! 此时数字与纯文本供应商不严格可比，但比「测不出」有用——模型确实在生成。
+//!
 //! ## 与故障转移的关系
 //!
 //! 本探测**绝不**触碰故障转移熔断器。熔断器只由 `proxy/forwarder.rs` 转发真实
@@ -174,6 +178,14 @@ struct StreamOutcome {
     first_token_ms: Option<u64>,
     duration_ms: u64,
     text: String,
+    /// 首个思维链增量的时刻与内容：整条流没有文本时用它证明模型确实在生成。
+    first_reasoning_ms: Option<u64>,
+    reasoning: String,
+    /// 流内的错误事件（HTTP 200 + SSE `error`）。上游把错误塞进流里时，
+    /// 这是唯一的失败原因来源。
+    stream_error: Option<String>,
+    /// 上游给出的结束原因（`max_tokens` / `stop` 等），用于解释「为什么没有文本」。
+    stop_reason: Option<String>,
     /// 首批解析成功的 SSE 事件（最多 3 条），在未提取到文本时用于诊断上游实际返回了什么。
     raw_events: Vec<Value>,
 }
@@ -356,6 +368,38 @@ pub async fn probe_endpoint(
         }
     };
 
+    judge_outcome(model, status.as_u16(), outcome)
+}
+
+/// 把读流结果判成成功 / 失败。
+///
+/// 与网络分离，便于对「200 但没文本」的各种分支直接写单测——这些分支正是
+/// 最容易踩坑的地方（思维链吃满额度、流内错误事件、非 SSE 的 JSON 错误体）。
+fn judge_outcome(model: &str, http_status: u16, outcome: StreamOutcome) -> ModelProbeResult {
+    // 流内错误事件优先于其它诊断：上游已经明说了原因，不必再猜。
+    if let Some(err) = outcome.stream_error {
+        return ModelProbeResult {
+            http_status: Some(http_status),
+            duration_ms: Some(outcome.duration_ms),
+            ..ModelProbeResult::failure(model, truncate_text(&err))
+        };
+    }
+
+    // 只有思维链、没有文本：开了思维链的模型把 max_tokens 全花在思考上时的常态。
+    // 鉴权与模型都是通的，报失败会误导，故按成功回传并在回复里标注来源。
+    if outcome.first_token_ms.is_none() && outcome.first_reasoning_ms.is_some() {
+        return ModelProbeResult {
+            success: true,
+            model: model.to_string(),
+            first_token_ms: outcome.first_reasoning_ms,
+            duration_ms: Some(outcome.duration_ms),
+            response_text: truncate_text(&format!("[思维链] {}", outcome.reasoning)),
+            http_status: Some(http_status),
+            message: String::new(),
+            tested_at: chrono::Utc::now().timestamp(),
+        };
+    }
+
     // 200 但一个文本增量都没有：多数是网关返回了非 SSE 的 JSON 错误体，或模型
     // 被静默拒绝。当成失败更诚实——否则会显示「通」但首字为空。
     if outcome.first_token_ms.is_none() {
@@ -381,8 +425,14 @@ pub async fn probe_endpoint(
         } else {
             "Stream returned no text content".to_string()
         };
+        // 带上结束原因：`max_tokens` 说明是被上限截断（多为思维链吃满额度），
+        // 与「上游静默拒绝」是两种完全不同的处置方式。
+        let hint = match outcome.stop_reason.as_deref() {
+            Some(reason) => format!("{hint} (stop_reason: {reason})"),
+            None => hint,
+        };
         return ModelProbeResult {
-            http_status: Some(status.as_u16()),
+            http_status: Some(http_status),
             duration_ms: Some(outcome.duration_ms),
             ..ModelProbeResult::failure(model, hint)
         };
@@ -394,7 +444,7 @@ pub async fn probe_endpoint(
         first_token_ms: outcome.first_token_ms,
         duration_ms: Some(outcome.duration_ms),
         response_text: truncate_text(&outcome.text),
-        http_status: Some(status.as_u16()),
+        http_status: Some(http_status),
         message: String::new(),
         tested_at: chrono::Utc::now().timestamp(),
     }
@@ -411,6 +461,10 @@ async fn read_stream(
     let mut remainder: Vec<u8> = Vec::new();
     let mut text = String::new();
     let mut first_token_ms: Option<u64> = None;
+    let mut reasoning = String::new();
+    let mut first_reasoning_ms: Option<u64> = None;
+    let mut stream_error: Option<String> = None;
+    let mut stop_reason: Option<String> = None;
     // 诊断用：收集未找到文本增量前的原始事件（最多 3 条），
     // 用于在错误消息里展示上游实际发了什么（thinking/ping/错误体等）。
     let mut raw_events: Vec<Value> = Vec::new();
@@ -435,14 +489,32 @@ async fn read_stream(
                 if first_token_ms.is_none() && raw_events.len() < 3 {
                     raw_events.push(event.clone());
                 }
+                // 错误事件可能出现在流的任意位置（含首个事件之后），必须全程盯着，
+                // 否则只会看到「没有文本」这种无从下手的结论。
+                if stream_error.is_none() {
+                    stream_error = extract_stream_error(&event);
+                }
+                if stop_reason.is_none() {
+                    stop_reason = extract_stop_reason(&event, format);
+                }
                 if let Some(delta) = extract_text_delta(&event, format) {
+                    if !delta.is_empty() {
+                        if first_token_ms.is_none() {
+                            first_token_ms = Some(start.elapsed().as_millis() as u64);
+                        }
+                        text.push_str(&delta);
+                        continue;
+                    }
+                }
+                // 思维链增量：不算首字，但整条流没有文本时它是唯一的存活证据。
+                if let Some(delta) = extract_reasoning_delta(&event, format) {
                     if delta.is_empty() {
                         continue;
                     }
-                    if first_token_ms.is_none() {
-                        first_token_ms = Some(start.elapsed().as_millis() as u64);
+                    if first_reasoning_ms.is_none() {
+                        first_reasoning_ms = Some(start.elapsed().as_millis() as u64);
                     }
-                    text.push_str(&delta);
+                    reasoning.push_str(&delta);
                 }
             }
         }
@@ -457,6 +529,10 @@ async fn read_stream(
         first_token_ms,
         duration_ms: start.elapsed().as_millis() as u64,
         text,
+        first_reasoning_ms,
+        reasoning,
+        stream_error,
+        stop_reason,
         raw_events,
     })
 }
@@ -559,13 +635,29 @@ pub fn build_probe_body(format: ApiFormat, model: &str, message: &str, max_token
 pub fn extract_text_delta(event: &Value, format: ApiFormat) -> Option<String> {
     match format {
         ApiFormat::Anthropic => {
+            // 部分网关把首段文本直接放在 content_block_start 里，之后才发 delta。
+            // 与 `default_ai::stream_read_anthropic` 同口径，否则同一个上游在
+            // 「测试」里不通、在助手对话里却能说话。
+            if event.get("type").and_then(Value::as_str) == Some("content_block_start") {
+                return event
+                    .pointer("/content_block/text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
             // content_block_delta { delta: { type: "text_delta", text } }
             let delta = event.get("delta")?;
-            if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
+            let delta_type = delta.get("type").and_then(Value::as_str);
+            if delta_type == Some("text_delta") {
                 return delta
                     .get("text")
                     .and_then(Value::as_str)
                     .map(str::to_string);
+            }
+            // 有明确的非文本增量类型（thinking_delta / input_json_delta / …）时
+            // 不能落到下面的兜底：thinking_delta 也带 text 字段的网关存在，
+            // 那会把思考当成首字。
+            if delta_type.is_some() {
+                return None;
             }
             // 部分网关直接给 { delta: { text } }
             delta
@@ -592,6 +684,97 @@ pub fn extract_text_delta(event: &Value, format: ApiFormat) -> Option<String> {
             .and_then(Value::as_str)
             .map(str::to_string),
     }
+}
+
+/// 从一个 SSE 事件里提取**思维链**增量。
+///
+/// 只在整条流没有任何文本增量时才用得上：开了思维链的模型撞上 `max_tokens`
+/// 上限（探测默认只给 64）会把额度全花在思考上，一个字的正文都发不出来。
+/// 那种情况下报「无文本」等于把一个能用的模型判死，故用它兜底。
+pub fn extract_reasoning_delta(event: &Value, format: ApiFormat) -> Option<String> {
+    match format {
+        ApiFormat::Anthropic => {
+            let delta = event.get("delta")?;
+            if delta.get("type").and_then(Value::as_str) != Some("thinking_delta") {
+                return None;
+            }
+            delta
+                .get("thinking")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }
+        // DeepSeek / 智谱 / Qwen 等 OpenAI 兼容端点各用一个字段名，全都认。
+        ApiFormat::OpenAiChat => ["reasoning_content", "reasoning", "thinking"]
+            .iter()
+            .find_map(|field| {
+                event
+                    .pointer(&format!("/choices/0/delta/{field}"))
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_string),
+        ApiFormat::OpenAiResponses => {
+            if event
+                .get("type")
+                .and_then(Value::as_str)?
+                .contains("reasoning")
+            {
+                return event
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            None
+        }
+        // Gemini 的思考摘要与正文同在 parts[].text，靠 `thought: true` 区分；
+        // 该字段在 parts 内而非顶层，且 extract_text_delta 已把 parts[0] 当正文，
+        // 这里不重复判断。
+        ApiFormat::GeminiNative => None,
+    }
+}
+
+/// 提取流内错误事件的描述。HTTP 200 + SSE `error` 是各家网关常见的错误传递方式。
+///
+/// 与 `default_ai::stream_read_anthropic` 的 `error` 分支同口径，另外兼容
+/// OpenAI 兼容端点的 `{"error": {...}}` 与顶层 `{"type":"error", ...}`。
+fn extract_stream_error(event: &Value) -> Option<String> {
+    let is_error_type = event.get("type").and_then(Value::as_str) == Some("error");
+    let error = event.get("error");
+    if !is_error_type && error.is_none() {
+        return None;
+    }
+
+    // 错误体既可能是 { error: { type, message } }，也可能是 { error: "..." }。
+    let node = error.unwrap_or(event);
+    if let Some(message) = node.as_str() {
+        return Some(message.to_string());
+    }
+    let kind = node
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| node.get("code").and_then(Value::as_str))
+        .unwrap_or("error");
+    let message = node
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Unknown error");
+    Some(format!("{kind}: {message}"))
+}
+
+/// 提取上游给出的结束原因，用来解释「200 但没有文本」。
+fn extract_stop_reason(event: &Value, format: ApiFormat) -> Option<String> {
+    let reason = match format {
+        ApiFormat::Anthropic => event
+            .pointer("/delta/stop_reason")
+            .or_else(|| event.pointer("/message/stop_reason"))
+            .or_else(|| event.get("stop_reason")),
+        ApiFormat::OpenAiChat => event.pointer("/choices/0/finish_reason"),
+        ApiFormat::OpenAiResponses => event.pointer("/response/status"),
+        ApiFormat::GeminiNative => event.pointer("/candidates/0/finishReason"),
+    };
+    reason
+        .and_then(Value::as_str)
+        .filter(|r| !r.is_empty() && *r != "null")
+        .map(str::to_string)
 }
 
 /// 判断 URL 是否以 OpenAI 风格版本段 `/v{N}` 结尾（`/v1`、`.../paas/v4`）。
@@ -800,6 +983,219 @@ mod tests {
 
         let ping = json!({ "type": "ping" });
         assert!(extract_text_delta(&ping, ApiFormat::Anthropic).is_none());
+    }
+
+    /// 空白 outcome 模板，各分支只改自己关心的字段。
+    fn outcome() -> StreamOutcome {
+        StreamOutcome {
+            first_token_ms: None,
+            duration_ms: 100,
+            text: String::new(),
+            first_reasoning_ms: None,
+            reasoning: String::new(),
+            stream_error: None,
+            stop_reason: None,
+            raw_events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn reasoning_only_stream_counts_as_reachable() {
+        // 开了思维链的模型 + max_tokens=64：额度全花在思考上，正文一个字都发不出。
+        // 鉴权与模型都是通的，判失败等于把能用的供应商标成坏的。
+        let r = judge_outcome(
+            "claude-x",
+            200,
+            StreamOutcome {
+                first_reasoning_ms: Some(700),
+                reasoning: "用户在问我是什么模型".to_string(),
+                stop_reason: Some("max_tokens".to_string()),
+                ..outcome()
+            },
+        );
+        assert!(r.success);
+        assert_eq!(r.first_token_ms, Some(700));
+        assert!(r.message.is_empty());
+        // 回复里要标明这不是正文，否则用户会以为模型答了这些字。
+        assert!(r.response_text.starts_with("[思维链]"));
+    }
+
+    #[test]
+    fn text_wins_over_reasoning_for_first_token() {
+        // 两者都有时，首字必须是文本的时刻，否则与不开思维链的供应商不可比。
+        let r = judge_outcome(
+            "claude-x",
+            200,
+            StreamOutcome {
+                first_token_ms: Some(900),
+                text: "我是 Claude".to_string(),
+                first_reasoning_ms: Some(300),
+                reasoning: "思考".to_string(),
+                ..outcome()
+            },
+        );
+        assert!(r.success);
+        assert_eq!(r.first_token_ms, Some(900));
+        assert_eq!(r.response_text, "我是 Claude");
+    }
+
+    #[test]
+    fn stream_error_beats_no_text_hint() {
+        // HTTP 200 + SSE error：上游已明说原因，不该再回「没有文本」这种废话。
+        let r = judge_outcome(
+            "claude-x",
+            200,
+            StreamOutcome {
+                stream_error: Some("overloaded_error: Overloaded".to_string()),
+                raw_events: vec![json!({ "type": "message_start" })],
+                ..outcome()
+            },
+        );
+        assert!(!r.success);
+        assert_eq!(r.message, "overloaded_error: Overloaded");
+        assert_eq!(r.http_status, Some(200));
+    }
+
+    #[test]
+    fn no_text_failure_appends_stop_reason() {
+        let r = judge_outcome(
+            "claude-x",
+            200,
+            StreamOutcome {
+                raw_events: vec![json!({ "type": "message_start" })],
+                stop_reason: Some("max_tokens".to_string()),
+                ..outcome()
+            },
+        );
+        assert!(!r.success);
+        assert!(r.message.contains("Received:"));
+        assert!(
+            r.message.contains("stop_reason: max_tokens"),
+            "结束原因决定了下一步怎么处置，必须带上：{}",
+            r.message
+        );
+    }
+
+    #[test]
+    fn anthropic_text_in_content_block_start_counts_as_text() {
+        // 部分网关把首段文本塞进 start 事件；漏掉它会让能用的上游报「无文本」。
+        let event = json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "我是" },
+        });
+        assert_eq!(
+            extract_text_delta(&event, ApiFormat::Anthropic).as_deref(),
+            Some("我是")
+        );
+
+        // tool_use 的 start 事件没有 text，不能误认。
+        let tool = json!({
+            "type": "content_block_start",
+            "content_block": { "type": "tool_use", "id": "t1", "name": "x", "input": {} },
+        });
+        assert!(extract_text_delta(&tool, ApiFormat::Anthropic).is_none());
+    }
+
+    #[test]
+    fn thinking_delta_carrying_text_field_is_not_first_token() {
+        // 有网关给 thinking_delta 也带上 text；兜底分支必须让位于显式类型判断，
+        // 否则思考会被当成首字，跟不开思维链的供应商不可比。
+        let event = json!({
+            "type": "content_block_delta",
+            "delta": { "type": "thinking_delta", "thinking": "嗯", "text": "嗯" },
+        });
+        assert!(extract_text_delta(&event, ApiFormat::Anthropic).is_none());
+        assert_eq!(
+            extract_reasoning_delta(&event, ApiFormat::Anthropic).as_deref(),
+            Some("嗯")
+        );
+    }
+
+    #[test]
+    fn reasoning_delta_recognized_per_format() {
+        let ant = json!({
+            "type": "content_block_delta",
+            "delta": { "type": "thinking_delta", "thinking": "let me" },
+        });
+        assert_eq!(
+            extract_reasoning_delta(&ant, ApiFormat::Anthropic).as_deref(),
+            Some("let me")
+        );
+        // 文本增量不是思维链。
+        let text = json!({ "delta": { "type": "text_delta", "text": "hi" } });
+        assert!(extract_reasoning_delta(&text, ApiFormat::Anthropic).is_none());
+
+        // OpenAI 兼容端点的三种字段名都要认。
+        for field in ["reasoning_content", "reasoning", "thinking"] {
+            let ev = json!({ "choices": [{ "delta": { field: "hmm" } }] });
+            assert_eq!(
+                extract_reasoning_delta(&ev, ApiFormat::OpenAiChat).as_deref(),
+                Some("hmm"),
+                "{field} should be recognized as reasoning"
+            );
+            // 且不能被当成正文。
+            assert!(extract_text_delta(&ev, ApiFormat::OpenAiChat).is_none());
+        }
+
+        let resp = json!({ "type": "response.reasoning_summary_text.delta", "delta": "why" });
+        assert_eq!(
+            extract_reasoning_delta(&resp, ApiFormat::OpenAiResponses).as_deref(),
+            Some("why")
+        );
+    }
+
+    #[test]
+    fn stream_error_events_are_extracted() {
+        // Anthropic 风格：HTTP 200 + SSE error 事件。
+        let ev = json!({
+            "type": "error",
+            "error": { "type": "overloaded_error", "message": "Overloaded" },
+        });
+        assert_eq!(
+            extract_stream_error(&ev).as_deref(),
+            Some("overloaded_error: Overloaded")
+        );
+
+        // OpenAI 兼容网关常见的 { error: { code, message } }。
+        let ev = json!({ "error": { "code": "insufficient_quota", "message": "no balance" } });
+        assert_eq!(
+            extract_stream_error(&ev).as_deref(),
+            Some("insufficient_quota: no balance")
+        );
+
+        // error 是裸字符串的网关。
+        let ev = json!({ "error": "boom" });
+        assert_eq!(extract_stream_error(&ev).as_deref(), Some("boom"));
+
+        // 正常事件不能被误判成错误。
+        let ev = json!({ "type": "content_block_delta", "delta": { "text": "hi" } });
+        assert!(extract_stream_error(&ev).is_none());
+    }
+
+    #[test]
+    fn stop_reason_extracted_per_format() {
+        let ev = json!({ "type": "message_delta", "delta": { "stop_reason": "max_tokens" } });
+        assert_eq!(
+            extract_stop_reason(&ev, ApiFormat::Anthropic).as_deref(),
+            Some("max_tokens")
+        );
+
+        // message_start 把 stop_reason 置为 null，不能当成结束原因。
+        let ev = json!({ "type": "message_start", "message": { "stop_reason": null } });
+        assert!(extract_stop_reason(&ev, ApiFormat::Anthropic).is_none());
+
+        let ev = json!({ "choices": [{ "finish_reason": "length" }] });
+        assert_eq!(
+            extract_stop_reason(&ev, ApiFormat::OpenAiChat).as_deref(),
+            Some("length")
+        );
+
+        let ev = json!({ "candidates": [{ "finishReason": "MAX_TOKENS" }] });
+        assert_eq!(
+            extract_stop_reason(&ev, ApiFormat::GeminiNative).as_deref(),
+            Some("MAX_TOKENS")
+        );
     }
 
     #[test]
