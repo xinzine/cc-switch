@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { proxyApi } from "@/lib/api/proxy";
 import {
   proxyKeys,
-  useProxyStatusQuery,
+  useProxyStatusEssentialsQuery,
   useProxyTakeoverStatus,
 } from "@/lib/query/proxy";
 import { extractErrorMessage } from "@/utils/errorUtils";
@@ -20,8 +20,9 @@ export function useProxyStatus() {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
-  // 查询状态（自动轮询）
-  const { data: status } = useProxyStatusQuery();
+  // 查询状态（自动轮询）。只取稳定字段：实时计数器每 2 秒都在变，
+  // 订阅它们会让 App 整棵子树跟着轮询重渲染（完整统计见 ProxyPanel）。
+  const { data: status } = useProxyStatusEssentialsQuery();
 
   // 查询各应用接管状态
   const { data: takeoverStatus } = useProxyTakeoverStatus(false);

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
+import i18n from "@/i18n";
 import { useSettingsQuery } from "@/lib/query";
 import type { Settings } from "@/types";
 
@@ -70,7 +70,6 @@ export interface UseSettingsFormResult {
  * - 表单重置
  */
 export function useSettingsForm(): UseSettingsFormResult {
-  const { i18n } = useTranslation();
   const { data, isLoading } = useSettingsQuery();
 
   const [settingsState, setSettingsState] = useState<SettingsFormState | null>(
@@ -78,6 +77,8 @@ export function useSettingsForm(): UseSettingsFormResult {
   );
 
   const initialLanguageRef = useRef<Language>("zh");
+  // 按 `data` 身份一次性 hydration：语言切换不能再触发把表单打回服务端值。
+  const hydratedDataRef = useRef<typeof data>(undefined);
 
   const readPersistedLanguage = useCallback((): Language => {
     if (typeof window !== "undefined") {
@@ -87,21 +88,21 @@ export function useSettingsForm(): UseSettingsFormResult {
       }
     }
     return normalizeLanguage(i18n.language);
-  }, [i18n]);
+  }, []);
 
-  const syncLanguage = useCallback(
-    (lang: Language) => {
-      const current = normalizeLanguage(i18n.language);
-      if (current !== lang) {
-        void i18n.changeLanguage(lang);
-      }
-    },
-    [i18n],
-  );
+  const syncLanguage = useCallback((lang: Language) => {
+    const current = normalizeLanguage(i18n.language);
+    if (current !== lang) {
+      void i18n.changeLanguage(lang);
+    }
+  }, []);
 
-  // 初始化设置数据
+  // 初始化设置数据。只在 React Query 的 `data` 身份变化时跑一次，
+  // 避免语言切换（或其它无关重渲染）把未保存的表单打回服务端值。
   useEffect(() => {
     if (!data) return;
+    if (hydratedDataRef.current === data) return;
+    hydratedDataRef.current = data;
 
     const normalizedLanguage = normalizeLanguage(
       data.language ?? readPersistedLanguage(),

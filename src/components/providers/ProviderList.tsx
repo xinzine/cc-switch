@@ -21,6 +21,7 @@ import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
 import { providersApi } from "@/lib/api/providers";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { useDragSort } from "@/hooks/useDragSort";
 import {
   useOpenClawLiveProviderIds,
@@ -230,6 +231,9 @@ export function ProviderList({
   );
 
   const [searchTerm, setSearchTerm] = useState("");
+  // 输入框绑 searchTerm 保证即时回显，过滤走防抖值：每次按键都重算会带着
+  // 整列卡片重渲染。
+  const debouncedSearchTerm = useDebouncedValue(searchTerm, 200);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const { data: claudeDesktopStatus } = useQuery({
@@ -324,7 +328,7 @@ export function ProviderList({
   }, [isSearchOpen]);
 
   const filteredProviders = useMemo(() => {
-    const keyword = searchTerm.trim().toLowerCase();
+    const keyword = debouncedSearchTerm.trim().toLowerCase();
     if (!keyword) return sortedProviders;
     return sortedProviders.filter((provider) => {
       const fields = [provider.name, provider.notes, provider.websiteUrl];
@@ -332,7 +336,7 @@ export function ProviderList({
         field?.toString().toLowerCase().includes(keyword),
       );
     });
-  }, [searchTerm, sortedProviders]);
+  }, [debouncedSearchTerm, sortedProviders]);
 
   /**
    * 批量操作候选：当前列表中可见、且不是官方账号类的供应商。

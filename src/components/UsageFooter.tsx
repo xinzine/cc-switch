@@ -3,6 +3,7 @@ import { RefreshCw, AlertCircle, Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { type AppId } from "@/lib/api";
 import { useUsageQuery } from "@/lib/query/queries";
+import { useNow } from "@/hooks/useNow";
 import { UsageData, Provider } from "@/types";
 import { TierBadge } from "@/components/SubscriptionQuotaFooter";
 import type { QuotaTier } from "@/types/subscription";
@@ -73,19 +74,9 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
     autoQueryInterval,
   });
 
-  // 🆕 定期更新当前时间，用于刷新相对时间显示
-  const [now, setNow] = React.useState(Date.now());
-
-  React.useEffect(() => {
-    if (!lastQueriedAt) return;
-
-    // 每30秒更新一次当前时间，触发相对时间显示的刷新
-    const interval = setInterval(() => {
-      setNow(Date.now());
-    }, 30000); // 30秒
-
-    return () => clearInterval(interval);
-  }, [lastQueriedAt]);
+  // 定期推进当前时间，用于刷新相对时间显示。走共享时钟：每张卡片各起一个
+  // 定时器的话，N 张卡片就是 N 个错峰定时器、各自触发一次重渲染。
+  const now = useNow(30000, Boolean(lastQueriedAt));
 
   // 只在启用用量查询且有数据时显示。后端把瞬时传输失败转成了 reject：有缓存
   // 成功值时 react-query 保留 data 照常展示；首次查询就失败则 data 为空——

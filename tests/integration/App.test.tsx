@@ -146,7 +146,11 @@ vi.mock("@/components/mcp/McpPanel", () => ({
 }));
 
 const renderApp = (AppComponent: ComponentType) => {
-  const client = new QueryClient();
+  // 不重试：默认的 retry 3 会让失败的查询把这个重集成测试额外拖长数秒
+  // （生产配置是 retry 1，见 src/lib/query/queryClient.ts）。
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
     <QueryClientProvider client={client}>
       <Suspense fallback={<div data-testid="loading">loading</div>}>
@@ -218,7 +222,9 @@ describe("App integration with MSW", () => {
 
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
-  });
+    // 这个用例驱动真实的 App 树跑 6 段 waitFor，隔离运行约 3.7s，但 84 个
+    // 测试文件并行争抢 CPU 时需要约 7.5s，默认 5s 预算会误报超时。
+  }, 20000);
 
   it("shows toast when auto sync fails in background", async () => {
     const { default: App } = await import("@/App");

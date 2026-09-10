@@ -18,6 +18,7 @@ import type { AppId } from "@/lib/api/types";
 import { useAiChat, type ChatImage } from "./useAiChat";
 import { ChatMessageItem } from "./ChatMessageItem";
 import { ToolConfirmCard } from "./ToolConfirmCard";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 /** 单张图片体积上限。base64 会膨胀约 1/3，5MB 原图约 6.7MB 请求体。 */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -157,7 +158,8 @@ export function AiChatPanel({ appId, onOpenSettings }: AiChatPanelProps) {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <TooltipProvider>
+      <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b border-border/40 px-6 py-2">
         <span className="text-xs text-muted-foreground">
           {t("aiChat.modelHint", {
@@ -313,7 +315,8 @@ export function AiChatPanel({ appId, onOpenSettings }: AiChatPanelProps) {
           </p>
         )}
       </div>
-    </div>
+      </div>
+    </TooltipProvider>
   );
 }
 

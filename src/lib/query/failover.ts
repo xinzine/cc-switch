@@ -10,11 +10,18 @@ import { proxyKeys } from "@/lib/query/proxy";
 /**
  * 获取供应商健康状态
  */
-export function useProviderHealth(providerId: string, appType: string) {
+export function useProviderHealth(
+  providerId: string,
+  appType: string,
+  options?: { enabled?: boolean },
+) {
   return useQuery({
     queryKey: ["providerHealth", providerId, appType],
     queryFn: () => failoverApi.getProviderHealth(providerId, appType),
-    enabled: !!providerId && !!appType,
+    // 调用方需自行门控：这是每 5 秒一次的 IPC，而每张供应商卡片都会挂一个。
+    // 结果用不到时（代理没跑 / 不在故障转移队列）必须关掉，否则 N 张卡片
+    // 就是 N 个常驻轮询。
+    enabled: !!providerId && !!appType && (options?.enabled ?? true),
     refetchInterval: 5000, // 每 5 秒刷新一次
     retry: false,
   });

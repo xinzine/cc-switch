@@ -599,7 +599,7 @@ function ProviderFormFull({
                   ? initialData.settingsConfig.config
                   : "",
               ),
-            ) ?? "openai_responses");
+            ) ?? "openai_chat");
 
   const [localCodexApiFormat, setLocalCodexApiFormat] =
     useState<CodexApiFormat>(initialCodexApiFormat);
@@ -1771,7 +1771,7 @@ function ProviderFormFull({
         setPromptCacheRouting("auto");
         setLocalCodexApiFormat(
           codexApiFormatFromWireApi(extractCodexWireApi(template.config)) ??
-            "openai_responses",
+            "openai_chat",
         );
       }
       if (appId === "gemini") {
@@ -1814,7 +1814,7 @@ function ProviderFormFull({
       setLocalCodexApiFormat(
         preset.apiFormat ??
           codexApiFormatFromWireApi(extractCodexWireApi(config)) ??
-          "openai_responses",
+          "openai_chat",
       );
 
       form.reset({

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { useSessionSearch } from "@/hooks/useSessionSearch";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -232,9 +233,13 @@ export function SessionManagerPage({ appId }: { appId: string }) {
     providerFilter,
   });
 
+  // 过滤走防抖值：每次按键都要跑 FlexSearch、重建两层分组、重渲染整列会话，
+  // 每个条目还要为高亮各建一个 RegExp。输入框仍绑 search，回显不受影响。
+  const debouncedSearch = useDebouncedValue(search, 200);
+
   const filteredSessions = useMemo(() => {
-    return searchSessions(search);
-  }, [searchSessions, search]);
+    return searchSessions(debouncedSearch);
+  }, [searchSessions, debouncedSearch]);
 
   const groupedSessions = useMemo(
     () =>
@@ -689,7 +694,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
         session={session}
         isSelected={isSelected}
         selectionMode={selectionMode}
-        searchQuery={search}
+        searchQuery={debouncedSearch}
         isChecked={selectedSessionKeys.has(sessionKey)}
         isCheckDisabled={!session.sourcePath}
         onSelect={setSelectedKey}
@@ -1672,7 +1677,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                                       isActive={
                                         activeMessageIndex === virtualRow.index
                                       }
-                                      searchQuery={search}
+                                      searchQuery={debouncedSearch}
                                       onCopy={handleMessageCopy}
                                     />
                                   </div>

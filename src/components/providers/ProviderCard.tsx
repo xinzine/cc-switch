@@ -194,7 +194,11 @@ export function ProviderCard({
   const handleDisableAnyOmo = isOmoSlim ? onDisableOmoSlim : onDisableOmo;
   const isAdditiveMode = appId === "opencode" && !isAnyOmo;
 
-  const { data: health } = useProviderHealth(provider.id, appId);
+  // 门控与下面 ProviderHealthBadge 的渲染条件保持一致：代理没跑或该供应商
+  // 不在故障转移队列时，健康状态既不显示也不该轮询。
+  const { data: health } = useProviderHealth(provider.id, appId, {
+    enabled: isProxyRunning && isInFailoverQueue,
+  });
 
   const fallbackUrlText = t("provider.notConfigured", {
     defaultValue: "未配置接口地址",
