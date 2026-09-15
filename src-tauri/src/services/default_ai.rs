@@ -147,7 +147,8 @@ impl DefaultAiService {
             false,
             None,
             None,
-            config.format() == ApiFormat::Anthropic,
+            Some(config.format().as_str()),
+            None,
         )
         .await
     }

@@ -147,7 +147,7 @@ pub async fn fetch_models_for_provider(
     let meta = provider.meta.as_ref();
     let is_full_url = meta.and_then(|m| m.is_full_url).unwrap_or(false);
     let user_agent = meta.and_then(|m| m.custom_user_agent_header().ok().flatten());
-    let prefer_anthropic = ApiFormat::resolve(&app_type, provider) == ApiFormat::Anthropic;
+    let api_format = ApiFormat::resolve(&app_type, provider).as_str();
 
     crate::services::model_fetch::fetch_models(
         &base_url,
@@ -158,7 +158,8 @@ pub async fn fetch_models_for_provider(
             .map(str::trim)
             .filter(|s| !s.is_empty()),
         user_agent,
-        prefer_anthropic,
+        Some(api_format),
+        None,
     )
     .await
 }
@@ -224,8 +225,7 @@ pub async fn batch_fetch_provider_models(
                 let meta = provider.meta.as_ref();
                 let is_full_url = meta.and_then(|m| m.is_full_url).unwrap_or(false);
                 let user_agent = meta.and_then(|m| m.custom_user_agent_header().ok().flatten());
-                let prefer_anthropic =
-                    ApiFormat::resolve(&app_type, &provider) == ApiFormat::Anthropic;
+                let api_format = ApiFormat::resolve(&app_type, &provider).as_str();
 
                 crate::services::model_fetch::fetch_models(
                     &base_url,
@@ -233,7 +233,8 @@ pub async fn batch_fetch_provider_models(
                     is_full_url,
                     None,
                     user_agent,
-                    prefer_anthropic,
+                    Some(api_format),
+                    None,
                 )
                 .await
             }
@@ -311,6 +312,14 @@ fn resolve_configured_model(app_type: &AppType, provider: &Provider) -> Option<S
             .get("models")
             .and_then(|v| v.as_object())
             .and_then(|m| m.keys().next().cloned()),
+        // Pi 没有单一兜底模型，取 models.json 里第一个模型（与列表页展示口径一致）。
+        AppType::Pi => config
+            .get("models")
+            .and_then(|v| v.as_array())
+            .and_then(|models| models.first())
+            .and_then(|m| m.get("id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
     };
     value
         .map(|v| v.trim().to_string())
@@ -365,6 +374,8 @@ fn extract_api_key(app_type: &AppType, provider: &Provider) -> Option<String> {
             .and_then(|v| v.as_str()),
         AppType::OpenClaw | AppType::Hermes => config.get("apiKey").and_then(|v| v.as_str()),
         AppType::OpenCode => config.pointer("/options/apiKey").and_then(|v| v.as_str()),
+        // Pi 的 models.json 供应商把 key 放在顶层 apiKey（与 provider.rs 口径一致）。
+        AppType::Pi => config.get("apiKey").and_then(|v| v.as_str()),
     };
     value
         .map(|s| s.trim().to_string())

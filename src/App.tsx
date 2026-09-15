@@ -26,12 +26,15 @@ import {
   Shield,
   Cpu,
   LayoutDashboard,
+  Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
 import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
+  piApi,
   providersApi,
   settingsApi,
   type AppId,
@@ -47,7 +50,10 @@ import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { useScanUnmanagedSkills } from "@/hooks/useSkills";
-import { extractErrorMessage } from "@/utils/errorUtils";
+import {
+  extractErrorMessage,
+  translatePiProviderMutationError,
+} from "@/utils/errorUtils";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import { deepClone } from "@/utils/deepClone";
 import { cn } from "@/lib/utils";
@@ -69,12 +75,14 @@ import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
 import { FailoverToggle } from "@/components/proxy/FailoverToggle";
+import { RoutingActivationBrand } from "@/components/proxy/RoutingActivationBrand";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel, {
   type UnifiedMcpPanelHandle,
 } from "@/components/mcp/UnifiedMcpPanel";
 import PromptPanel, {
   type PromptPanelHandle,
+  type PromptPrimaryAction,
 } from "@/components/prompts/PromptPanel";
 import {
   SkillsPage,
@@ -83,6 +91,7 @@ import {
   type SkillsPageHandle,
 } from "@/components/skills/SkillsPage";
 import UnifiedSkillsPanel, {
+  type SkillsCheckUpdatesState,
   type UnifiedSkillsPanelHandle,
 } from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
@@ -96,6 +105,7 @@ import {
   useDisableCurrentOmo,
   useDisableCurrentOmoSlim,
 } from "@/lib/query/omo";
+import { invalidatePiProviderCaches, usePiCurrentState } from "@/lib/query/pi";
 import WorkspaceFilesPanel from "@/components/workspace/WorkspaceFilesPanel";
 import EnvPanel from "@/components/openclaw/EnvPanel";
 import ToolsPanel from "@/components/openclaw/ToolsPanel";
@@ -103,6 +113,11 @@ import AgentsDefaultsPanel from "@/components/openclaw/AgentsDefaultsPanel";
 import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
 import { AiChatPanel } from "@/components/aichat/AiChatPanel";
+import {
+  APP_IDS,
+  DEFAULT_VISIBLE_APPS,
+  isProxyAppId,
+} from "@/config/appConfig";
 
 type View =
   | "providers"
@@ -130,20 +145,9 @@ const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
 
 const STORAGE_KEY = "cc-switch-last-app";
-const VALID_APPS: AppId[] = [
-  "claude",
-  "claude-desktop",
-  "codex",
-  "gemini",
-  "grokbuild",
-  "opencode",
-  "openclaw",
-  "hermes",
-];
-
 const getInitialApp = (): AppId => {
   const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
-  if (saved && VALID_APPS.includes(saved)) {
+  if (saved && APP_IDS.includes(saved)) {
     return saved;
   }
   return "claude";
@@ -190,6 +194,16 @@ function App() {
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+  const [mcpManagementBusy, setMcpManagementBusy] = useState(false);
+  const [skillsManagementBusy, setSkillsManagementBusy] = useState(false);
+  const [skillsNavigationBusy, setSkillsNavigationBusy] = useState(false);
+  const [promptManagementBusy, setPromptManagementBusy] = useState(false);
+  const [promptNavigationBusy, setPromptNavigationBusy] = useState(false);
+  const [skillsCheckUpdatesState, setSkillsCheckUpdatesState] =
+    useState<SkillsCheckUpdatesState>({
+      isChecking: false,
+      hasSkills: false,
+    });
 
   useEffect(() => {
     localStorage.setItem(VIEW_STORAGE_KEY, currentView);
@@ -200,27 +214,16 @@ function App() {
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
   const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
-  const visibleApps: VisibleApps = settingsData?.visibleApps ?? {
-    claude: true,
-    "claude-desktop": true,
-    codex: true,
-    gemini: true,
-    grokbuild: true,
-    opencode: true,
-    openclaw: true,
-    hermes: true,
-  };
+  const visibleApps = useMemo<VisibleApps>(
+    () => ({
+      ...DEFAULT_VISIBLE_APPS,
+      ...settingsData?.visibleApps,
+    }),
+    [settingsData?.visibleApps],
+  );
 
   const getFirstVisibleApp = (): AppId => {
-    if (visibleApps.claude) return "claude";
-    if (visibleApps["claude-desktop"]) return "claude-desktop";
-    if (visibleApps.codex) return "codex";
-    if (visibleApps.gemini) return "gemini";
-    if (visibleApps.grokbuild) return "grokbuild";
-    if (visibleApps.opencode) return "opencode";
-    if (visibleApps.openclaw) return "openclaw";
-    if (visibleApps.hermes) return "hermes";
-    return "claude"; // fallback
+    return APP_IDS.find((app) => visibleApps[app]) ?? "claude";
   };
 
   useEffect(() => {
@@ -231,6 +234,10 @@ function App() {
 
   // Fallback from sessions view when switching to an app without session support
   useEffect(() => {
+    if (currentView === "mcp" && sharedFeatureApp === "pi") {
+      setCurrentView("providers");
+      return;
+    }
     if (
       currentView === "sessions" &&
       sharedFeatureApp !== "claude" &&
@@ -239,7 +246,8 @@ function App() {
       sharedFeatureApp !== "opencode" &&
       sharedFeatureApp !== "openclaw" &&
       sharedFeatureApp !== "gemini" &&
-      sharedFeatureApp !== "hermes"
+      sharedFeatureApp !== "hermes" &&
+      sharedFeatureApp !== "pi"
     ) {
       setCurrentView("providers");
     }
@@ -263,6 +271,8 @@ function App() {
   const mcpPanelRef = useRef<UnifiedMcpPanelHandle>(null);
   const skillsPageRef = useRef<SkillsPageHandle>(null);
   const unifiedSkillsPanelRef = useRef<UnifiedSkillsPanelHandle>(null);
+  const [promptPrimaryAction, setPromptPrimaryAction] =
+    useState<PromptPrimaryAction>("prompt");
   // 订阅未管理 Skill 的共享缓存（实际扫描由 UnifiedSkillsPanel 进入页面时触发）。
   // 这里 enabled 默认 false，仅用于「导入」按钮的绿点提示，不主动发起扫描。
   const { data: unmanagedSkills } = useScanUnmanagedSkills();
@@ -275,17 +285,24 @@ function App() {
     takeoverStatus,
     status: proxyStatus,
   } = useProxyStatus();
-  const isCurrentAppTakeoverActive = takeoverStatus?.[activeApp] || false;
+  const proxyAppId = isProxyAppId(activeApp) ? activeApp : null;
+  const currentAppUsesProxy =
+    proxyAppId !== null || activeApp === "claude-desktop";
+  const isCurrentAppTakeoverActive = proxyAppId
+    ? takeoverStatus?.[proxyAppId] || false
+    : false;
   const activeProviderId = useMemo(() => {
+    if (!proxyAppId) return undefined;
     const target = proxyStatus?.active_targets?.find(
-      (t) => t.app_type === activeApp,
+      (t) => t.app_type === proxyAppId,
     );
     return target?.provider_id;
-  }, [proxyStatus?.active_targets, activeApp]);
+  }, [proxyStatus?.active_targets, proxyAppId]);
 
   const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
-    isProxyRunning,
+    isProxyRunning: currentAppUsesProxy && isProxyRunning,
   });
+  const { data: piCurrentState } = usePiCurrentState(activeApp === "pi");
   const providers = useMemo(() => data?.providers ?? {}, [data]);
   const currentProviderId = data?.currentProviderId ?? "";
   const isOpenClawView =
@@ -306,7 +323,9 @@ function App() {
     sharedFeatureApp === "opencode" ||
     sharedFeatureApp === "openclaw" ||
     sharedFeatureApp === "gemini" ||
-    sharedFeatureApp === "hermes";
+    sharedFeatureApp === "hermes" ||
+    sharedFeatureApp === "pi";
+  const hasMcpSupport = sharedFeatureApp !== "pi";
 
   const {
     addProvider,
@@ -317,9 +336,39 @@ function App() {
     setAsDefaultModel,
   } = useProviderActions(
     activeApp,
-    isProxyRunning,
+    currentAppUsesProxy && isProxyRunning,
     isProxyRunning && isCurrentAppTakeoverActive,
   );
+  const handleEnablePiProvider = async (provider: Provider) => {
+    try {
+      await providersApi.switch(provider.id, "pi");
+      await invalidatePiProviderCaches(queryClient);
+      await providersApi.updateTrayMenu().catch((error) => {
+        console.error(
+          "Failed to update tray menu after enabling Pi provider",
+          error,
+        );
+      });
+      toast.success(
+        t("pi.provider.enabled", {
+          defaultValue: "已在 Pi 中启用",
+        }),
+        { closeButton: true },
+      );
+    } catch (error) {
+      const detail = extractErrorMessage(error);
+      toast.error(
+        t("pi.provider.enableFailed", {
+          defaultValue: "无法在 Pi 中启用此供应商",
+        }),
+        {
+          description:
+            translatePiProviderMutationError(detail, t) || detail || undefined,
+          closeButton: true,
+        },
+      );
+    }
+  };
 
   const disableOmoMutation = useDisableCurrentOmo();
   const handleDisableOmo = () => {
@@ -366,6 +415,9 @@ function App() {
             if (event.appType === activeApp) {
               await refetch();
             }
+            if (event.appType === "pi") {
+              await invalidatePiProviderCaches(queryClient);
+            }
           },
         );
         if (!active) {
@@ -383,7 +435,7 @@ function App() {
       active = false;
       unsubscribe?.();
     };
-  }, [activeApp, refetch]);
+  }, [activeApp, queryClient, refetch]);
 
   useTauriEvent("universal-provider-synced", async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
@@ -601,6 +653,10 @@ function App() {
   }, [activeApp]);
 
   const currentViewRef = useRef(currentView);
+  const managementBusy =
+    mcpManagementBusy || skillsNavigationBusy || promptNavigationBusy;
+  const managementBusyRef = useRef(false);
+  managementBusyRef.current = managementBusy;
 
   useEffect(() => {
     currentViewRef.current = currentView;
@@ -609,6 +665,10 @@ function App() {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "," && (event.metaKey || event.ctrlKey)) {
+        if (managementBusyRef.current) {
+          event.preventDefault();
+          return;
+        }
         event.preventDefault();
         setCurrentView("settings");
         return;
@@ -620,6 +680,7 @@ function App() {
 
       const view = currentViewRef.current;
       if (view === "providers") return;
+      if (managementBusyRef.current) return;
 
       if (isTextEditableTarget(event.target)) return;
 
@@ -669,7 +730,26 @@ function App() {
     if (action === "remove") {
       // Remove from live config only (for additive mode apps like OpenCode/OpenClaw)
       // Does NOT delete from database - provider remains in the list
-      await providersApi.removeFromLiveConfig(provider.id, activeApp);
+      try {
+        await providersApi.removeFromLiveConfig(provider.id, activeApp);
+      } catch (error) {
+        const detail = extractErrorMessage(error);
+        const description =
+          activeApp === "pi"
+            ? translatePiProviderMutationError(detail, t) || detail
+            : detail;
+        if (activeApp === "pi") {
+          void invalidatePiProviderCaches(queryClient).catch(() => undefined);
+        }
+        toast.error(t("notifications.removeFromConfigFailed"), {
+          description: description || t("common.unknown"),
+          closeButton: true,
+        });
+        return;
+      }
+      if (activeApp === "pi") {
+        await invalidatePiProviderCaches(queryClient);
+      }
       // Invalidate queries to refresh the isInConfig state
       if (activeApp === "opencode") {
         await queryClient.invalidateQueries({
@@ -688,9 +768,13 @@ function App() {
         });
       }
       toast.success(
-        t("notifications.removeFromConfigSuccess", {
-          defaultValue: "已从配置移除",
-        }),
+        activeApp === "pi"
+          ? t("pi.provider.removed", {
+              defaultValue: "已从 Pi 移除",
+            })
+          : t("notifications.removeFromConfigSuccess", {
+              defaultValue: "已从配置移除",
+            }),
         { closeButton: true },
       );
     } else {
@@ -737,7 +821,8 @@ function App() {
     if (
       activeApp === "opencode" ||
       activeApp === "openclaw" ||
-      activeApp === "hermes"
+      activeApp === "hermes" ||
+      activeApp === "pi"
     ) {
       let liveProviderIds: string[] = [];
       try {
@@ -752,10 +837,17 @@ function App() {
                   queryKey: openclawKeys.liveProviderIds,
                   queryFn: () => providersApi.getOpenClawLiveProviderIds(),
                 })
-              : await queryClient.ensureQueryData({
-                  queryKey: hermesKeys.liveProviderIds,
-                  queryFn: () => providersApi.getHermesLiveProviderIds(),
-                });
+              : activeApp === "hermes"
+                ? await queryClient.ensureQueryData({
+                    queryKey: hermesKeys.liveProviderIds,
+                    queryFn: () => providersApi.getHermesLiveProviderIds(),
+                  })
+                : (
+                    await queryClient.ensureQueryData({
+                      queryKey: ["pi", "currentState"],
+                      queryFn: () => piApi.getCurrentState(),
+                    })
+                  ).enabledProviderIds;
       } catch (error) {
         console.error(
           "[App] Failed to load live provider IDs for duplication",
@@ -809,6 +901,26 @@ function App() {
 
     await addProvider(duplicatedProvider);
   };
+
+  const confirmActionMessage = useMemo(() => {
+    if (!confirmAction) return "";
+
+    const message =
+      confirmAction.action === "remove"
+        ? t("confirm.removeProviderMessage", {
+            name: confirmAction.provider.name,
+          })
+        : t("confirm.deleteProviderMessage", {
+            name: confirmAction.provider.name,
+          });
+    const isPiGlobalDefault =
+      activeApp === "pi" &&
+      piCurrentState?.defaultProviderId === confirmAction.provider.id;
+
+    return isPiGlobalDefault
+      ? `${message}\n\n${t("confirm.piDefaultProviderWarning")}`
+      : message;
+  }, [activeApp, confirmAction, piCurrentState?.defaultProviderId, t]);
 
   const handleOpenTerminal = async (provider: Provider) => {
     try {
@@ -919,6 +1031,9 @@ function App() {
               open={true}
               onOpenChange={() => setCurrentView("providers")}
               appId={sharedFeatureApp}
+              onInteractionBlockedChange={setPromptManagementBusy}
+              onNavigationBlockedChange={setPromptNavigationBusy}
+              onPrimaryActionChange={setPromptPrimaryAction}
             />
           );
         case "hermesMemory":
@@ -928,6 +1043,9 @@ function App() {
             <UnifiedSkillsPanel
               ref={unifiedSkillsPanelRef}
               onOpenDiscovery={handleOpenSkillsDiscovery}
+              onInteractionBlockedChange={setSkillsManagementBusy}
+              onNavigationBlockedChange={setSkillsNavigationBusy}
+              onCheckUpdatesStateChange={setSkillsCheckUpdatesState}
               currentApp={
                 sharedFeatureApp === "openclaw" ? "claude" : sharedFeatureApp
               }
@@ -948,6 +1066,7 @@ function App() {
             <UnifiedMcpPanel
               ref={mcpPanelRef}
               onOpenChange={() => setCurrentView("providers")}
+              onInteractionBlockedChange={setMcpManagementBusy}
             />
           );
         case "agents":
@@ -994,12 +1113,16 @@ function App() {
                       currentProviderId={currentProviderId}
                       appId={activeApp}
                       isLoading={isLoading}
-                      isProxyRunning={isProxyRunning}
+                      isProxyRunning={currentAppUsesProxy && isProxyRunning}
                       isProxyTakeover={
                         isProxyRunning && isCurrentAppTakeoverActive
                       }
                       activeProviderId={activeProviderId}
-                      onSwitch={switchProvider}
+                      onSwitch={
+                        activeApp === "pi"
+                          ? handleEnablePiProvider
+                          : switchProvider
+                      }
                       onEdit={(provider) => {
                         setEditingProvider(provider);
                       }}
@@ -1009,7 +1132,8 @@ function App() {
                       onRemoveFromConfig={
                         activeApp === "opencode" ||
                         activeApp === "openclaw" ||
-                        activeApp === "hermes"
+                        activeApp === "hermes" ||
+                        activeApp === "pi"
                           ? (provider) =>
                               setConfirmAction({ provider, action: "remove" })
                           : undefined
@@ -1181,6 +1305,8 @@ function App() {
                 <Button
                   variant="outline"
                   size="icon"
+                  disabled={managementBusy}
+                  aria-label={t("common.back")}
                   onClick={() =>
                     setCurrentView(
                       currentView === "skillsDiscovery"
@@ -1188,7 +1314,10 @@ function App() {
                         : "providers",
                     )
                   }
-                  className="mr-2 rounded-lg"
+                  className={cn(
+                    "mr-2 rounded-lg",
+                    managementBusy && "disabled:opacity-100",
+                  )}
                 >
                   <ArrowLeft className="w-4 h-4" />
                 </Button>
@@ -1217,21 +1346,13 @@ function App() {
               </div>
             ) : (
               <div className="flex items-center gap-2">
-                <div className="relative inline-flex items-center">
-                  <a
-                    href="https://ccswitch.io"
-                    target="_blank"
-                    rel="noreferrer"
-                    className={cn(
-                      "text-xl font-semibold transition-colors",
-                      isProxyRunning && isCurrentAppTakeoverActive
-                        ? "text-emerald-500 hover:text-emerald-600 dark:text-emerald-400 dark:hover:text-emerald-300"
-                        : "text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300",
-                    )}
-                  >
-                    CC Switch
-                  </a>
-                </div>
+                <RoutingActivationBrand
+                  active={isProxyRunning && isCurrentAppTakeoverActive}
+                  contextKey={activeApp}
+                  ready={
+                    proxyStatus !== undefined && takeoverStatus !== undefined
+                  }
+                />
                 <Button
                   variant="ghost"
                   size="icon"
@@ -1272,24 +1393,23 @@ function App() {
 
           <div className="flex flex-1 min-w-0 items-center justify-end gap-1.5">
             {currentView === "providers" &&
-              activeApp !== "opencode" &&
-              activeApp !== "openclaw" &&
-              activeApp !== "hermes" && (
+              (activeApp === "claude-desktop" || proxyAppId) && (
                 <div
                   className="flex shrink-0 items-center gap-1.5"
                   style={{ WebkitAppRegion: "no-drag" }}
                 >
                   {activeApp === "claude-desktop" ? (
                     <ClaudeDesktopRouteToggle />
-                  ) : (
-                    settingsData?.enableLocalProxy && (
-                      <ProxyToggle activeApp={activeApp} />
-                    )
-                  )}
-                  {activeApp !== "claude-desktop" &&
-                    settingsData?.enableFailoverToggle && (
-                      <FailoverToggle activeApp={activeApp} />
-                    )}
+                  ) : proxyAppId ? (
+                    <>
+                      {settingsData?.enableLocalProxy && (
+                        <ProxyToggle activeApp={proxyAppId} />
+                      )}
+                      {settingsData?.enableFailoverToggle && (
+                        <FailoverToggle activeApp={proxyAppId} />
+                      )}
+                    </>
+                  ) : null}
                 </div>
               )}
             {currentView === "providers" &&
@@ -1301,20 +1421,37 @@ function App() {
                   <ProfileSwitcher activeApp={activeApp} />
                 </div>
               )}
-            <div className="flex flex-1 min-w-0 overflow-x-hidden items-center py-4 pr-2">
+            {/* 弹性中段：空间不足时由 AppSwitcher 自行收纳溢出应用；
+                justify-end + overflow-hidden 只裁剪 resize 瞬间的过渡帧 */}
+            <div className="flex flex-1 min-w-0 items-center justify-end overflow-hidden py-4">
+              {currentView === "providers" && (
+                <AppSwitcher
+                  activeApp={activeApp}
+                  onSwitch={setActiveApp}
+                  visibleApps={visibleApps}
+                />
+              )}
+            </div>
+            {/* 固定右端：主操作（添加供应商等）shrink-0，任何配置下不被挤出 */}
+            <div className="flex shrink-0 items-center py-4">
               <div
                 className="flex shrink-0 items-center gap-1.5 ml-auto"
                 style={{ WebkitAppRegion: "no-drag" }}
               >
-                {currentView === "prompts" && (
+                {currentView === "prompts" && promptPrimaryAction && (
                   <Button
                     variant="ghost"
                     size="sm"
+                    disabled={promptManagementBusy}
                     onClick={() => promptPanelRef.current?.openAdd()}
-                    className="hover:bg-black/5 dark:hover:bg-white/5"
+                    className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
                   >
                     <Plus className="w-4 h-4 mr-2" />
-                    {t("prompts.add")}
+                    {t(
+                      promptPrimaryAction === "template"
+                        ? "pi.prompts.newTemplate"
+                        : "prompts.add",
+                    )}
                   </Button>
                 )}
                 {currentView === "mcp" && (
@@ -1322,8 +1459,9 @@ function App() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      disabled={mcpManagementBusy}
                       onClick={() => mcpPanelRef.current?.openImport()}
-                      className="hover:bg-black/5 dark:hover:bg-white/5"
+                      className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
                     >
                       <Download className="w-4 h-4 mr-2" />
                       {t("mcp.importExisting")}
@@ -1331,8 +1469,9 @@ function App() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      disabled={mcpManagementBusy}
                       onClick={() => mcpPanelRef.current?.openAdd()}
-                      className="hover:bg-black/5 dark:hover:bg-white/5"
+                      className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
                     >
                       <Plus className="w-4 h-4 mr-2" />
                       {t("mcp.addMcp")}
@@ -1344,10 +1483,36 @@ function App() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      disabled={
+                        skillsManagementBusy ||
+                        skillsCheckUpdatesState.isChecking ||
+                        !skillsCheckUpdatesState.hasSkills
+                      }
+                      onClick={() =>
+                        unifiedSkillsPanelRef.current?.checkUpdates()
+                      }
+                      className={cn(
+                        "hover:bg-black/5 dark:hover:bg-white/5",
+                        skillsManagementBusy && "disabled:opacity-100",
+                      )}
+                    >
+                      {skillsCheckUpdatesState.isChecking ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                      )}
+                      {skillsCheckUpdatesState.isChecking
+                        ? t("skills.checkingUpdates")
+                        : t("skills.checkUpdates")}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={skillsManagementBusy}
                       onClick={() =>
                         unifiedSkillsPanelRef.current?.openRestoreFromBackup()
                       }
-                      className="hover:bg-black/5 dark:hover:bg-white/5"
+                      className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
                     >
                       <History className="w-4 h-4 mr-2" />
                       {t("skills.restoreFromBackup.button")}
@@ -1355,10 +1520,11 @@ function App() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      disabled={skillsManagementBusy}
                       onClick={() =>
                         unifiedSkillsPanelRef.current?.openInstallFromZip()
                       }
-                      className="hover:bg-black/5 dark:hover:bg-white/5"
+                      className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
                     >
                       <FolderArchive className="w-4 h-4 mr-2" />
                       {t("skills.installFromZip.button")}
@@ -1366,10 +1532,11 @@ function App() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      disabled={skillsManagementBusy}
                       onClick={() =>
                         unifiedSkillsPanelRef.current?.openImport()
                       }
-                      className="relative hover:bg-black/5 dark:hover:bg-white/5"
+                      className="relative hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
                       title={
                         hasUnmanagedSkills
                           ? t("skills.unmanagedAvailable")
@@ -1388,8 +1555,11 @@ function App() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={handleOpenSkillsDiscovery}
-                      className="hover:bg-black/5 dark:hover:bg-white/5"
+                      disabled={skillsManagementBusy}
+                      onClick={() =>
+                        unifiedSkillsPanelRef.current?.openDiscovery()
+                      }
+                      className="hover:bg-black/5 disabled:opacity-100 dark:hover:bg-white/5"
                     >
                       <Search className="w-4 h-4 mr-2" />
                       {t("skills.discover")}
@@ -1416,12 +1586,6 @@ function App() {
                 )}
                 {currentView === "providers" && (
                   <>
-                    <AppSwitcher
-                      activeApp={activeApp}
-                      onSwitch={setActiveApp}
-                      visibleApps={visibleApps}
-                    />
-
                     <div className="flex items-center gap-1 p-1 bg-muted rounded-xl">
                       <AnimatePresence mode="wait">
                         <motion.div
@@ -1492,15 +1656,17 @@ function App() {
                               >
                                 <LayoutDashboard className="w-4 h-4" />
                               </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("mcp")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("mcp.title")}
-                              >
-                                <McpIcon size={16} />
-                              </Button>
+                              {hasMcpSupport && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => setCurrentView("mcp")}
+                                  className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
+                                  title={t("mcp.title")}
+                                >
+                                  <McpIcon size={16} />
+                                </Button>
+                              )}
                             </>
                           ) : activeApp === "openclaw" ? (
                             <>
@@ -1591,15 +1757,17 @@ function App() {
                               >
                                 <History className="flex-shrink-0 w-4 h-4" />
                               </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setCurrentView("mcp")}
-                                className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("mcp.title")}
-                              >
-                                <McpIcon size={16} />
-                              </Button>
+                              {hasMcpSupport && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => setCurrentView("mcp")}
+                                  className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
+                                  title={t("mcp.title")}
+                                >
+                                  <McpIcon size={16} />
+                                </Button>
+                              )}
                             </>
                           )}
                         </motion.div>
@@ -1610,6 +1778,8 @@ function App() {
                       onClick={() => setIsAddOpen(true)}
                       size="icon"
                       className={`ml-2 ${addActionButtonClass}`}
+                      aria-label={t("provider.addNewProvider")}
+                      title={t("provider.addNewProvider")}
                     >
                       <Plus className="w-5 h-5" />
                     </Button>
@@ -1678,17 +1848,7 @@ function App() {
             ? t("confirm.removeProvider")
             : t("confirm.deleteProvider")
         }
-        message={
-          confirmAction
-            ? confirmAction.action === "remove"
-              ? t("confirm.removeProviderMessage", {
-                  name: confirmAction.provider.name,
-                })
-              : t("confirm.deleteProviderMessage", {
-                  name: confirmAction.provider.name,
-                })
-            : ""
-        }
+        message={confirmActionMessage}
         onConfirm={() => void handleConfirmAction()}
         onCancel={() => setConfirmAction(null)}
       />

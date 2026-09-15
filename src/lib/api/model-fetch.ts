@@ -7,15 +7,21 @@ export interface FetchedModel {
   ownedBy: string | null;
 }
 
+export interface ModelFetchOptions {
+  apiFormat?: string;
+  requestHeaders?: Record<string, string>;
+}
+
 /**
  * 从供应商获取可用模型列表
  *
  * 使用 OpenAI 兼容的 GET /v1/models 端点。优先用 `modelsUrl` 精确覆写；
  * 否则后端会对 baseURL 生成候选列表并按序尝试（含"剥离 /anthropic 等兼容子路径"兜底）。
  *
- * `preferAnthropicAuth` 为真时优先用 `x-api-key` + `anthropic-version` 鉴权
- * （原生 Anthropic 端点不认 Bearer）；两种口径后端都会依次尝试，故传错只影响
- * 第一次尝试的顺序，不会导致取不到模型。
+ * `options.apiFormat` 决定鉴权口径（`anthropic` 用 `x-api-key` +
+ * `anthropic-version`，`gemini_native` 用 `x-goog-api-key`，OpenAI 系用 Bearer）；
+ * 未标注时后端先试 Bearer，401/403 再换 Anthropic，故传错只影响第一次尝试的顺序，
+ * 不会导致取不到模型。
  */
 export async function fetchModelsForConfig(
   baseUrl: string,
@@ -23,7 +29,7 @@ export async function fetchModelsForConfig(
   isFullUrl?: boolean,
   modelsUrl?: string,
   customUserAgent?: string,
-  preferAnthropicAuth?: boolean,
+  options?: ModelFetchOptions,
 ): Promise<FetchedModel[]> {
   return invoke("fetch_models_for_config", {
     baseUrl,
@@ -31,8 +37,19 @@ export async function fetchModelsForConfig(
     isFullUrl,
     modelsUrl,
     customUserAgent,
-    preferAnthropicAuth,
+    apiFormat: options?.apiFormat,
+    requestHeaders: options?.requestHeaders,
   });
+}
+
+export interface OpenCodeModelRef {
+  providerId: string;
+  modelId: string;
+}
+
+/** 获取 OpenCode 当前运行时可用模型（包含 OAuth 与 Zen 免费模型）。 */
+export async function getOpenCodeModels(): Promise<OpenCodeModelRef[]> {
+  return invoke("get_opencode_models");
 }
 
 /**

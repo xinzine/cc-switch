@@ -12,6 +12,7 @@ import {
   useProxyTakeoverStatus,
 } from "@/lib/query/proxy";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { getAppLabel } from "@/config/appConfig";
 
 /**
  * 代理服务状态管理
@@ -22,10 +23,12 @@ export function useProxyStatus() {
 
   // 查询状态（自动轮询）。只取稳定字段：实时计数器每 2 秒都在变，
   // 订阅它们会让 App 整棵子树跟着轮询重渲染（完整统计见 ProxyPanel）。
-  const { data: status } = useProxyStatusEssentialsQuery();
+  const { data: status, isPending: isProxyStatusPending } =
+    useProxyStatusEssentialsQuery();
 
   // 查询各应用接管状态
-  const { data: takeoverStatus } = useProxyTakeoverStatus(false);
+  const { data: takeoverStatus, isPending: isTakeoverStatusPending } =
+    useProxyTakeoverStatus(false);
 
   // 启动服务器（总开关：仅启动服务，不接管）
   const startProxyServerMutation = useMutation({
@@ -115,16 +118,7 @@ export function useProxyStatus() {
     mutationFn: ({ appType, enabled }: { appType: string; enabled: boolean }) =>
       proxyApi.setProxyTakeoverForApp(appType, enabled),
     onSuccess: (_data, variables) => {
-      const appLabel =
-        variables.appType === "claude"
-          ? "Claude"
-          : variables.appType === "codex"
-            ? "Codex"
-            : variables.appType === "gemini"
-              ? "Gemini"
-              : variables.appType === "grokbuild"
-                ? "Grok Build"
-                : "OpenCode";
+      const appLabel = getAppLabel(variables.appType);
 
       toast.success(
         variables.enabled
@@ -138,7 +132,6 @@ export function useProxyStatus() {
             }),
         { closeButton: true },
       );
-
       queryClient.invalidateQueries({ queryKey: proxyKeys.status });
       queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
     },
@@ -159,6 +152,7 @@ export function useProxyStatus() {
     status,
     isRunning: status?.running || false,
     takeoverStatus,
+    isInitialStatusPending: isProxyStatusPending || isTakeoverStatusPending,
 
     // 启动/停止（总开关）
     startProxyServer: startProxyServerMutation.mutateAsync,

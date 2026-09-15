@@ -4,9 +4,10 @@
 //! 主要面向第三方聚合站（硅基流动、OpenRouter 等），以及把 Anthropic
 //! 协议挂在兼容子路径上的官方供应商（DeepSeek、Kimi、智谱 GLM 等）。
 
-use reqwest::header::{HeaderValue, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, USER_AGENT};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// 获取到的模型信息
@@ -30,9 +31,9 @@ struct ModelEntry {
 }
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
-
-/// Anthropic Messages API 版本头。原生 Anthropic 端点缺此头会 400。
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+const MAX_REQUEST_HEADERS: usize = 64;
+const MAX_HEADER_NAME_BYTES: usize = 256;
+const MAX_HEADER_VALUE_BYTES: usize = 16 * 1024;
 
 /// 404/405 响应体截断长度：避免把几十 KB HTML 404 页整页保留到错误串里。
 const ERROR_BODY_MAX_CHARS: usize = 512;
@@ -55,56 +56,46 @@ const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
 ///
 /// 使用 OpenAI 兼容的 GET /v1/models 端点，按候选列表顺序尝试。
 ///
-/// `prefer_anthropic_auth` 为真时改用 Anthropic 的鉴权口径
-/// （`x-api-key` + `anthropic-version`）。Anthropic 原生端点不认 Bearer，
-/// 只发 Bearer 会稳定拿到 401；反之 OpenAI 兼容端点通常会忽略多余的 x-api-key，
-/// 因此两种口径都会作为候选依次尝试（先按偏好排，401/403 时换另一种）。
+/// 鉴权口径由 `api_format` 决定（`anthropic` / `anthropic-messages` 用
+/// `x-api-key` + `anthropic-version`，`gemini_native` / `google-generative-ai`
+/// 用 `x-goog-api-key`，OpenAI 系用 Bearer）。无法判定时先试 Bearer，401/403
+/// 时在同一 URL 上换 Anthropic 口径 —— Anthropic 原生端点不认 Bearer，
+/// 只发 Bearer 会稳定拿到 401。
 pub async fn fetch_models(
     base_url: &str,
     api_key: &str,
     is_full_url: bool,
     models_url_override: Option<&str>,
     user_agent: Option<HeaderValue>,
-    prefer_anthropic_auth: bool,
+    api_format: Option<&str>,
+    request_headers: Option<&BTreeMap<String, String>>,
 ) -> Result<Vec<FetchedModel>, String> {
-    if api_key.is_empty() {
-        return Err("API Key is required to fetch models".to_string());
-    }
-
     let candidates = build_models_url_candidates(base_url, is_full_url, models_url_override)?;
+    let header_attempts = build_model_fetch_header_attempts(
+        api_key,
+        api_format,
+        user_agent.as_ref(),
+        request_headers,
+    )?;
     let client = crate::proxy::http_client::get();
     let mut last_err: Option<String> = None;
-    let log_secrets = vec![api_key.to_string()];
-
-    // 鉴权口径按偏好排序；每个 URL 先试首选，遇 401/403 再试另一种。
-    let auth_modes: [AuthMode; 2] = if prefer_anthropic_auth {
-        [AuthMode::Anthropic, AuthMode::Bearer]
-    } else {
-        [AuthMode::Bearer, AuthMode::Anthropic]
-    };
+    let mut known_secrets = vec![api_key.to_string()];
+    if let Some(request_headers) = request_headers {
+        known_secrets.extend(request_headers.values().cloned());
+    }
 
     'candidates: for url in &candidates {
         log::debug!(
             "[ModelFetch] Trying endpoint: {}",
-            crate::url_for_log_with_secrets(url, &log_secrets)
+            crate::url_for_log_with_secrets(url, &known_secrets)
         );
 
-        for (idx, mode) in auth_modes.iter().enumerate() {
-            let is_last_mode = idx + 1 == auth_modes.len();
-            let mut request = client
+        for (idx, headers) in header_attempts.iter().enumerate() {
+            let is_last_attempt = idx + 1 == header_attempts.len();
+            let request = client
                 .get(url)
+                .headers(headers.clone())
                 .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS));
-            request = match mode {
-                AuthMode::Bearer => request.header("Authorization", format!("Bearer {api_key}")),
-                AuthMode::Anthropic => request
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", ANTHROPIC_VERSION),
-            };
-            // 自定义 User-Agent：部分 /models 端点同样有 UA 白名单（如 Kimi Coding Plan），
-            // 与转发 / 检测路径共用同一 UA，避免"代理可用但取模型失败"。
-            if let Some(ua) = &user_agent {
-                request = request.header(USER_AGENT, ua.clone());
-            }
             let response = match request.send().await {
                 Ok(r) => r,
                 Err(e) => {
@@ -136,22 +127,31 @@ pub async fn fetch_models(
 
             // 路径不对：换下一个候选 URL（换鉴权口径也救不了 404）。
             if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
-                let body = truncate_body(response.text().await.unwrap_or_default());
+                let body = redact_model_fetch_error_body(
+                    response.text().await.unwrap_or_default(),
+                    &known_secrets,
+                );
                 last_err = Some(format!("HTTP {status}: {body}"));
                 continue 'candidates;
             }
 
-            // 鉴权被拒：同一个 URL 换另一种鉴权口径再试一次。
+            // 鉴权被拒：同一个 URL 换另一种口径再试一次。
             if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                let body = truncate_body(response.text().await.unwrap_or_default());
+                let body = redact_model_fetch_error_body(
+                    response.text().await.unwrap_or_default(),
+                    &known_secrets,
+                );
                 last_err = Some(format!("HTTP {status}: {body}"));
-                if is_last_mode {
+                if is_last_attempt {
                     continue 'candidates;
                 }
                 continue;
             }
 
-            let body = truncate_body(response.text().await.unwrap_or_default());
+            let body = redact_model_fetch_error_body(
+                response.text().await.unwrap_or_default(),
+                &known_secrets,
+            );
             return Err(format!("HTTP {status}: {body}"));
         }
     }
@@ -162,13 +162,139 @@ pub async fn fetch_models(
     ))
 }
 
+/// Anthropic Messages API 版本头。原生 Anthropic 端点缺此头会 400。
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+fn redact_model_fetch_error_body(body: String, known_secrets: &[String]) -> String {
+    truncate_body(crate::redact_known_secrets_strict(&body, known_secrets))
+}
+
 /// `/models` 端点的鉴权口径。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthMode {
     /// `Authorization: Bearer <key>`（OpenAI 兼容端点）
     Bearer,
     /// `x-api-key: <key>` + `anthropic-version`（Anthropic 原生端点）
     Anthropic,
+    /// `x-goog-api-key: <key>`（Google Generative AI 端点）
+    Google,
+}
+
+/// 把 `meta.apiFormat` 归一成鉴权口径。
+///
+/// 前端历史上两种写法都出现过：协议名（`anthropic`、`gemini_native`）与
+/// 头样式名（`anthropic-messages`、`google-generative-ai`）。两者都接受，
+/// 否则显式标注 Anthropic 的供应商会去发 Bearer 而拿到 401。
+fn auth_mode_for_format(api_format: Option<&str>) -> Option<AuthMode> {
+    match api_format.map(str::trim) {
+        Some("anthropic") | Some("anthropic-messages") => Some(AuthMode::Anthropic),
+        Some("gemini_native") | Some("google-generative-ai") => Some(AuthMode::Google),
+        Some("openai_chat") | Some("openai_responses") => Some(AuthMode::Bearer),
+        // 未标注（None）或未知值：没有可依据的口径，由调用方决定兜底。
+        _ => None,
+    }
+}
+
+/// 构造按顺序尝试的请求头组合。
+///
+/// 首选口径由 `api_format` 决定；无法从 `api_format` 判定时，先试 Bearer、
+/// 再试 Anthropic —— Anthropic 原生端点不认 Bearer，只发 Bearer 会稳定拿到
+/// 401，反之 OpenAI 兼容端点通常会忽略多余的 `x-api-key`。
+/// 自定义 `request_headers` 每次都会并入，用户显式配置优先。
+fn build_model_fetch_header_attempts(
+    api_key: &str,
+    api_format: Option<&str>,
+    user_agent: Option<&HeaderValue>,
+    request_headers: Option<&BTreeMap<String, String>>,
+) -> Result<Vec<HeaderMap>, String> {
+    let modes: Vec<AuthMode> = match auth_mode_for_format(api_format) {
+        // 已能判定：以其为准，不回退（原生端点换另一种口径也救不了）。
+        Some(mode) => vec![mode],
+        // 未标注或未知：Bearror 起步，401/403 时换 Anthropic 兜底。
+        None => vec![AuthMode::Bearer, AuthMode::Anthropic],
+    };
+
+    let mut attempts = Vec::with_capacity(modes.len());
+    for mode in modes {
+        attempts.push(build_model_fetch_headers(
+            api_key,
+            mode,
+            user_agent,
+            request_headers,
+        )?);
+    }
+    Ok(attempts)
+}
+
+fn build_model_fetch_headers(
+    api_key: &str,
+    mode: AuthMode,
+    user_agent: Option<&HeaderValue>,
+    request_headers: Option<&BTreeMap<String, String>>,
+) -> Result<HeaderMap, String> {
+    let custom_count = request_headers.map_or(0, BTreeMap::len);
+    if api_key.is_empty() && custom_count == 0 {
+        return Err("API Key or request headers are required to fetch models".to_string());
+    }
+    if custom_count > MAX_REQUEST_HEADERS {
+        return Err(format!(
+            "Too many model-fetch request headers (maximum {MAX_REQUEST_HEADERS})"
+        ));
+    }
+
+    let mut headers = HeaderMap::new();
+    if !api_key.is_empty() {
+        match mode {
+            AuthMode::Anthropic => {
+                headers.insert(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_str(api_key)
+                        .map_err(|error| format!("Invalid API Key header value: {error}"))?,
+                );
+                headers.insert(
+                    HeaderName::from_static("anthropic-version"),
+                    HeaderValue::from_static(ANTHROPIC_VERSION),
+                );
+            }
+            AuthMode::Google => {
+                headers.insert(
+                    HeaderName::from_static("x-goog-api-key"),
+                    HeaderValue::from_str(api_key)
+                        .map_err(|error| format!("Invalid API Key header value: {error}"))?,
+                );
+            }
+            AuthMode::Bearer => {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {api_key}"))
+                        .map_err(|error| format!("Invalid API Key header value: {error}"))?,
+                );
+            }
+        }
+    }
+
+    if let Some(user_agent) = user_agent {
+        headers.insert(USER_AGENT, user_agent.clone());
+    }
+
+    if let Some(request_headers) = request_headers {
+        for (raw_name, raw_value) in request_headers {
+            let name = raw_name.trim();
+            if name.is_empty() || name.len() > MAX_HEADER_NAME_BYTES {
+                return Err(format!("Invalid model-fetch header name: {raw_name}"));
+            }
+            if raw_value.len() > MAX_HEADER_VALUE_BYTES {
+                return Err(format!("Model-fetch header value is too large: {name}"));
+            }
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|error| format!("Invalid model-fetch header name {name}: {error}"))?;
+            let value = HeaderValue::from_str(raw_value)
+                .map_err(|error| format!("Invalid model-fetch header value for {name}: {error}"))?;
+            headers.insert(name, value);
+        }
+    }
+
+    Ok(headers)
 }
 
 /// 构造「模型列表端点」的候选 URL 列表
@@ -283,6 +409,118 @@ fn ends_with_version_segment(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_fetch_headers_follow_pi_api_format() {
+        let anthropic =
+            build_model_fetch_headers("anthropic-key", AuthMode::Anthropic, None, None).unwrap();
+        assert_eq!(anthropic["x-api-key"], "anthropic-key");
+        assert_eq!(anthropic["anthropic-version"], "2023-06-01");
+        assert!(!anthropic.contains_key(AUTHORIZATION));
+
+        let google = build_model_fetch_headers("google-key", AuthMode::Google, None, None).unwrap();
+        assert_eq!(google["x-goog-api-key"], "google-key");
+        assert!(!google.contains_key(AUTHORIZATION));
+
+        let openai = build_model_fetch_headers("openai-key", AuthMode::Bearer, None, None).unwrap();
+        assert_eq!(openai[AUTHORIZATION], "Bearer openai-key");
+    }
+
+    /// 协议名与头样式名两种写法都要能判定出口径：上游只认 `anthropic-messages`，
+    /// 而前端 `meta.apiFormat` 实际写的是 `anthropic`。
+    #[test]
+    fn auth_mode_for_format_accepts_both_naming_conventions() {
+        assert_eq!(
+            auth_mode_for_format(Some("anthropic")),
+            Some(AuthMode::Anthropic)
+        );
+        assert_eq!(
+            auth_mode_for_format(Some("anthropic-messages")),
+            Some(AuthMode::Anthropic)
+        );
+        assert_eq!(
+            auth_mode_for_format(Some("gemini_native")),
+            Some(AuthMode::Google)
+        );
+        assert_eq!(
+            auth_mode_for_format(Some("google-generative-ai")),
+            Some(AuthMode::Google)
+        );
+        assert_eq!(
+            auth_mode_for_format(Some("openai_chat")),
+            Some(AuthMode::Bearer)
+        );
+        assert_eq!(
+            auth_mode_for_format(Some("openai_responses")),
+            Some(AuthMode::Bearer)
+        );
+        // 未标注 / 未知值 → 交由调用方决定兜底顺序
+        assert_eq!(auth_mode_for_format(None), None);
+        assert_eq!(auth_mode_for_format(Some("something-else")), None);
+    }
+
+    #[test]
+    fn header_attempts_fall_back_only_when_format_is_unknown() {
+        // 未标注格式：Bearer 起步，401/403 时换 Anthropic 兜底
+        let attempts = build_model_fetch_header_attempts("k", None, None, None).unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0][AUTHORIZATION], "Bearer k");
+        assert_eq!(attempts[1]["x-api-key"], "k");
+
+        // 已标注 Anthropic：一次到位，不浪费一次必然 401 的 Bearer 请求
+        let attempts =
+            build_model_fetch_header_attempts("k", Some("anthropic"), None, None).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0]["x-api-key"], "k");
+
+        // 已标注 OpenAI 格式：同理不追加 Anthropic
+        let attempts =
+            build_model_fetch_header_attempts("k", Some("openai_chat"), None, None).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0][AUTHORIZATION], "Bearer k");
+    }
+
+    #[test]
+    fn model_fetch_headers_allow_validated_header_only_auth_and_overrides() {
+        let custom = BTreeMap::from([
+            ("Authorization".to_string(), "Token literal".to_string()),
+            ("X-Tenant".to_string(), "tenant-a".to_string()),
+        ]);
+        let headers = build_model_fetch_headers("", AuthMode::Bearer, None, Some(&custom)).unwrap();
+        assert_eq!(headers[AUTHORIZATION], "Token literal");
+        assert_eq!(headers["x-tenant"], "tenant-a");
+
+        let override_default =
+            BTreeMap::from([("x-api-key".to_string(), "header-managed-key".to_string())]);
+        let headers = build_model_fetch_headers(
+            "provider-key",
+            AuthMode::Anthropic,
+            None,
+            Some(&override_default),
+        )
+        .unwrap();
+        assert_eq!(headers["x-api-key"], "header-managed-key");
+    }
+
+    #[test]
+    fn model_fetch_headers_reject_invalid_or_missing_credentials() {
+        assert!(build_model_fetch_headers("", AuthMode::Bearer, None, None).is_err());
+        let invalid = BTreeMap::from([("bad header".to_string(), "literal-value".to_string())]);
+        assert!(build_model_fetch_headers("", AuthMode::Bearer, None, Some(&invalid)).is_err());
+    }
+
+    #[test]
+    fn model_fetch_error_body_redacts_known_header_credentials() {
+        let secrets = vec![
+            "short".to_string(),
+            "Bearer literal-header-secret".to_string(),
+        ];
+        let body = redact_model_fetch_error_body(
+            "invalid short / Bearer literal-header-secret".to_string(),
+            &secrets,
+        );
+        assert_eq!(body, "invalid [REDACTED] / [REDACTED]");
+    }
 
     #[test]
     fn test_candidates_plain_root() {

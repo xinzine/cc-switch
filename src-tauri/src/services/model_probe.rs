@@ -84,6 +84,17 @@ impl ApiFormat {
             .and_then(Self::from_meta_str)
             .unwrap_or_else(|| Self::default_for_app(app_type))
     }
+
+    /// 规范字符串形式，取值与 `meta.apiFormat` 一致。用于把解析结果传给按字符串
+    /// 判定鉴权口径的下游（如 `/models` 取模型）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAiChat => "openai_chat",
+            Self::OpenAiResponses => "openai_responses",
+            Self::GeminiNative => "gemini_native",
+        }
+    }
 }
 
 /// 测活请求：让模型用尽量少的字自报模型与知识截止时间，既能确认它真的在
@@ -249,7 +260,12 @@ impl ModelProbeService {
         let url = build_probe_url(base_url, format, model, is_full_url)?;
         let body = build_probe_body(format, model, &config.message, config.max_tokens);
 
-        let adapter = Self::adapter_for(app_type);
+        let adapter = Self::adapter_for(app_type).ok_or_else(|| {
+            AppError::Message(format!(
+                "{} does not support model probing",
+                app_type.as_str()
+            ))
+        })?;
         let auth = adapter.extract_auth(provider).ok_or_else(|| {
             AppError::Message("No API key configured for this provider".to_string())
         })?;
@@ -285,9 +301,11 @@ impl ModelProbeService {
         crate::services::stream_check::StreamCheckService::resolve_base_url(app_type, provider)
     }
 
-    fn adapter_for(app_type: &AppType) -> Box<dyn ProviderAdapter> {
+    /// 取该应用的鉴权适配器。`None` 表示该应用不走 adapter 鉴权（如 Pi），
+    /// 探测无法执行——由调用方回传一条失败结果，而不是 panic。
+    fn adapter_for(app_type: &AppType) -> Option<Box<dyn ProviderAdapter>> {
         match app_type {
-            AppType::ClaudeDesktop => Box::new(ClaudeAdapter::new()),
+            AppType::ClaudeDesktop => Some(Box::new(ClaudeAdapter::new())),
             other => get_adapter(other),
         }
     }
