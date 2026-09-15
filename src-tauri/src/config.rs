@@ -20,17 +20,23 @@ use crate::error::AppError;
 /// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `CC_SWITCH_TEST_HOME`
 /// 显式覆盖 home dir（仅用于测试/调试场景）。
 pub fn get_home_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("CC_SWITCH_TEST_HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
+    if let Some(test_home) = test_home_override() {
+        return test_home;
     }
 
     dirs::home_dir().unwrap_or_else(|| {
         log::warn!("无法获取用户主目录，回退到当前目录");
         PathBuf::from(".")
     })
+}
+
+fn test_home_override() -> Option<PathBuf> {
+    let home = std::env::var("CC_SWITCH_TEST_HOME").ok()?;
+    let trimmed = home.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
 }
 
 /// 获取 Claude Code 配置目录路径
@@ -186,6 +192,12 @@ pub fn get_app_config_dir() -> PathBuf {
     }
 
     let default_dir = get_home_dir().join(".cc-switch");
+
+    // 测试隔离时跳过 Windows legacy 回退：HOME 由 Git Bash 注入指向真实用户
+    // 目录，legacy 分支会把测试数据写进真实配置目录。
+    if test_home_override().is_some() {
+        return default_dir;
+    }
 
     // 兼容 v3.10.3：当用户环境存在 `HOME` 且与真实用户目录不同，
     // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。

@@ -279,9 +279,12 @@ describe("SessionManagerPage", () => {
       expect(screen.queryByText("Alpha Session")).not.toBeInTheDocument(),
     );
 
-    expect(
-      screen.getByText("sessionManager.selectSession"),
-    ).toBeInTheDocument();
+    // 删除后选中态要等搜索防抖（200ms）把过滤结果清空才回落到占位符
+    await waitFor(() =>
+      expect(
+        screen.getByText("sessionManager.selectSession"),
+      ).toBeInTheDocument(),
+    );
     expect(
       screen.queryByText("sessionManager.emptySession"),
     ).not.toBeInTheDocument();

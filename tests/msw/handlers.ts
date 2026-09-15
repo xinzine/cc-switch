@@ -380,5 +380,12 @@ export const handlers = [
     }),
   ),
   http.post(`${TAURI_ENDPOINT}/reset_circuit_breaker`, () => success(true)),
+  http.post(`${TAURI_ENDPOINT}/list_profiles`, () =>
+    success({
+      profiles: [],
+      currentIds: { claude: null, claudeDesktop: null, codex: null },
+    }),
+  ),
+
   http.post(`${TAURI_ENDPOINT}/get_circuit_breaker_stats`, () => success(null)),
 ];

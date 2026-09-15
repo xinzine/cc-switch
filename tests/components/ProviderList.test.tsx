@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactElement } from "react";
@@ -264,7 +264,7 @@ describe("ProviderList Component", () => {
     );
   });
 
-  it("filters providers with the search input", () => {
+  it("filters providers with the search input", async () => {
     const providerAlpha = createProvider({ id: "alpha", name: "Alpha Labs" });
     const providerBeta = createProvider({ id: "beta", name: "Beta Works" });
 
@@ -295,15 +295,22 @@ describe("ProviderList Component", () => {
     expect(screen.getByTestId("provider-card-alpha")).toBeInTheDocument();
     expect(screen.getByTestId("provider-card-beta")).toBeInTheDocument();
 
+    // 搜索经过 200ms 防抖，过滤结果不会在 change 事件的同一帧出现
     fireEvent.change(searchInput, { target: { value: "beta" } });
-    expect(screen.queryByTestId("provider-card-alpha")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("provider-card-alpha"),
+      ).not.toBeInTheDocument(),
+    );
     expect(screen.getByTestId("provider-card-beta")).toBeInTheDocument();
 
     fireEvent.change(searchInput, { target: { value: "gamma" } });
+    await waitFor(() =>
+      expect(
+        screen.getByText("No providers match your search."),
+      ).toBeInTheDocument(),
+    );
     expect(screen.queryByTestId("provider-card-alpha")).not.toBeInTheDocument();
     expect(screen.queryByTestId("provider-card-beta")).not.toBeInTheDocument();
-    expect(
-      screen.getByText("No providers match your search."),
-    ).toBeInTheDocument();
   });
 });
